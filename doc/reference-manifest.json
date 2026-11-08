@@ -1,0 +1,52 @@
+{
+  "project": "armv5",
+  "local_directory": "doc/local",
+  "references_are_build_inputs": false,
+  "documents": [
+    {
+      "title": "ARM926EJ-S Technical Reference Manual",
+      "file": "arm926-trm.pdf",
+      "official_url": "https://documentation-service.arm.com/static/5e8e3d1088295d1e18d3a9b2",
+      "source_url": "https://documentation-service.arm.com/static/5e8e3d1088295d1e18d3a9b2",
+      "revision": "r0p5, 2008",
+      "document": "ARM DDI 0198E",
+      "bytes": 1495050,
+      "sha256": "baa4122918a4e54057ccd1e2199ec4b61e8ee28fab73f764b3f4c04662fad55c",
+      "pages": 236,
+      "scope": "ARM926EJ-S programmer model, CP15, MMU, FCSE, TLB, caches and TCM",
+      "redistributed": false,
+      "local_origin": "Verified copy of the existing local manufacturer reference",
+      "provenance": "Manufacturer-authored document downloaded directly from the official ARM documentation service for analysis only. Chapters 2 and 3 support CP15 register/operation names and translation descriptor interpretations. It is not a source-build input."
+    },
+    {
+      "title": "ARM Architecture Reference Manual",
+      "file": "arm-architecture-ddi0100i.pdf",
+      "official_url": "https://documentation-service.arm.com/static/5f8dacc8f86e16515cdb865a",
+      "source_url": "https://documentation-service.arm.com/static/5f8dacc8f86e16515cdb865a",
+      "revision": "Issue I, 2005",
+      "document": "ARM DDI 0100I",
+      "bytes": 5740865,
+      "sha256": "c441eb7f981f3beb5ad901716808cd54d86e9b41aa68b42a2ce9701831b0b7ea",
+      "pages": 1138,
+      "scope": "ARM/Thumb instruction semantics and architecture version rules; select ARMv5TEJ",
+      "redistributed": false,
+      "local_origin": "Downloaded from official manufacturer URL",
+      "provenance": "Exact local identity from direct official download; see SHA-256."
+    },
+    {
+      "title": "AM1705 ARM Microprocessor Datasheet",
+      "file": "am1705.pdf",
+      "official_url": "https://www.ti.com/lit/ds/symlink/am1705.pdf",
+      "source_url": "https://www.ti.com/lit/ds/symlink/am1705.pdf",
+      "revision": "Revision F, January 2017",
+      "document": "TI SPRS657F",
+      "bytes": 1990387,
+      "sha256": "f2c16110300e04aaf3271a17616f3881dc70ee4cfb88a5a89c0601fd6ba4fe6b",
+      "pages": 167,
+      "scope": "Candidate device integration context; exact Nord MCU remains unconfirmed",
+      "redistributed": false,
+      "local_origin": "Downloaded from official manufacturer URL",
+      "provenance": "Exact local identity from direct official download; see SHA-256."
+    }
+  ]
+}
