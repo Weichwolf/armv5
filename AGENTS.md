@@ -57,7 +57,7 @@
   dependency notices. Do not import GPL-2.0-only code or another emulator's core.
 - Keep canonical main current; commit reviewed increments. Push only an already
   configured origin/main when authorized. No --all/--mirror or backup branches.
-  No remote is configured by this initial local project setup.
+  The authorized GitHub destination is private Weichwolf/armv5; preserve privacy.
 - Coordinate with the Lead A1 consumer only through private Weichwolf/lead-a1-src
   issue #1 when explicitly authorized. Do not copy private reconstruction material
   into public projects. No routine issue-status spam or hardware flashing.
