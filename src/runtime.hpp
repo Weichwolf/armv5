@@ -24,7 +24,8 @@ enum class Signal : std::uint8_t {
   undefined,
   prefetch_abort,
   data_abort,
-  exchange
+  exchange,
+  redispatch
 };
 
 struct DirectRegion {

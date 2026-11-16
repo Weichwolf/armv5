@@ -213,6 +213,9 @@ struct Core::Impl {
       return true;
     }
     switch (signal) {
+      case detail::Signal::redispatch:
+        runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+        return true;
       case detail::Signal::software_interrupt:
         return exception(
             {.vector = 8, .mode = detail::supervisor_mode}, runtime.r[15], false, false);

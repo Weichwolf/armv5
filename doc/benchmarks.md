@@ -185,3 +185,67 @@ qualification, CoreMark and final sanitizer qualification remain open.
 
 Published increment totals: `src/` 3,529 lines (+673), `test/` 3,966 (+1,664)
 against A3. Counts include all versioned text under those directories.
+
+
+## Forward leaf calls after A4
+
+Forward ARM BL calls with a straight-line leaf body use caller-specific SSA
+edges. The same instruction emitter lowers the specialized body, using the
+caller's existing forward-path admission proof. The actual LR or loaded return
+PC is compared with the caller-produced link; a mismatch leaves through a cold
+owner exit after ordinary target/interworking/variant checks. The shared body
+and exact continuations remain available at every original guest PC. Callees
+containing branches, loops or nested calls, and backwards callees, retain the
+existing prepared control flow.
+
+Same host and warm measurement method as A4. Independent new fixtures cover
+BX LR, MOV PC,LR, LDR PC and LDM PC returns, changed LR/stack values, ARM/Thumb
+interworking, undeclared destinations, every call-prefix instruction bound,
+intervening cycle deadlines and snapshot replay, plus exact callback/yield
+prefixes inside a specialized body.
+The same fixtures also pass against the unchanged A4 library.
+
+| K4 metric | A4 | Forward leaf calls |
+|---|---:|---:|
+| Required operation, I/GI | 1.143 (128/112) | 0.982 (110/112) |
+| Memory guards/address, I/GI | 2.777 (311/112) | 2.911 (326/112) |
+| Admission/accounting, I/GI | 3.643 (408/112) | 3.500 (392/112) |
+| Transfer, I/GI | 4.875 (546/112) | 3.563 (399/112) |
+| Status, I/GI | 1.429 (160/112) | 1.429 (160/112) |
+| Total host I/GI | 13.866 (1553/112) | 12.384 (1387/112) |
+| Hardware cycles/GI | 3.372 | 3.198 |
+| Native text bytes | 23073 | 21726 |
+| Bytes/prepared instruction | 404.789 | 381.158 |
+
+Attribution uses an interior eight-handler cycle and the same native stepping
+and category definitions as A4. Constant propagation of the specialized callee
+and merged counter updates contribute to the gain. The native total matches the
+hardware instruction count; allocation changes shift some work into memory
+address preparation. Transfer and admission remain substantial costs.
+
+All six complete-output checks, including the v6 Q1.15 hashes, pass. The columns
+below retain the full contract report; native guest-instruction share is 100%.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 17.080 | 4.479 | 1.098501 | 910.331 | 13.848x | 0.081590 | 5,898 | 210.643 |
+| K2 | 6.167 | 1.683 | 0.413109 | 2420.671 | 3.061x | 0.249729 | 16,168 | 234.319 |
+| K3 | 6.370 | 1.646 | 0.404109 | 2474.579 | 1.080x | 0.193779 | 13,110 | 208.095 |
+| K4 | 12.384 | 3.198 | 0.782026 | 1278.731 | 12.794x | 0.679967 | 21,726 | 381.158 |
+| K5 | 15.398 | 3.813 | 0.932634 | 1072.231 | 71.806x | 0.038056 | 3,359 | 305.364 |
+| K6 | 20.910 | 6.039 | 1.482416 | 674.575 | 18.862x | 0.091132 | 6,795 | 226.500 |
+
+Guest instructions/base cycles per sample are unchanged from the A4 table.
+
+```text
+armv5-f95190e84f36053b62f02152d508e230de1e01249f2f0593dea2c83ee1ca28c9-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+`src/`: 3,657 lines (+128 against A4).
+
+`test/`: 4,182 lines (+216 against A4).
+
+Validation: strict Release and all three suites, configured static analysis,
+formatting, offline source export and an installed SDK consumer executing
+ARM/Thumb and repeated static calls. This experiment does not complete the
+profile; the open work in `isa-coverage.md` remains.

@@ -433,9 +433,8 @@ void Lowering::edge(Values values, std::uint32_t target) {
     if (head == heads_.end()) {
       jump(tails_[found->second], values);
     } else {
-      auto &destination = blocks_[head->second];
-      jump(admitted_path_ && target > emitting_pc_ ? destination.admitted : destination.head,
-           values);
+      auto &body = blocks_[head->second];
+      jump(admitted_path_ && target > emitting_pc_ ? body.admitted : body.head, values);
     }
     return;
   }
@@ -448,7 +447,10 @@ void Lowering::edge(Values values, std::uint32_t target) {
   unknown_target(values, c32(target));
 }
 
-void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
+void Lowering::transfer(Values values,
+                        llvm::Value *target,
+                        bool exchange,
+                        TransferExit destination) {
   constexpr std::uint32_t thumb_bit = 0x20;
   if (exchange) {
     auto *next_thumb = ir_.CreateICmpNE(ir_.CreateAnd(target, c32(1)), c32(0));
@@ -464,6 +466,10 @@ void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
     ir_.SetInsertPoint(ordinary);
   }
   target = ir_.CreateAnd(target, c32(thumb_ ? ~std::uint32_t{1} : arm_pc_mask));
+  if (destination == TransferExit::owner) {
+    cold_transfer(values, target);
+    return;
+  }
   if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(target)) {
     const auto address = static_cast<std::uint32_t>(constant->getZExtValue());
     const auto prepared = indices_.find(address);
@@ -478,9 +484,9 @@ void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
   auto *unknown = block("undeclared.target");
   auto *dispatch = ir_.CreateSwitch(target, unknown, unsigned(code_.size()));
   for (auto &index : code_) {
-    auto *destination = block("indirect.target");
-    dispatch->addCase(ir_.getInt32(index.pc), destination);
-    ir_.SetInsertPoint(destination);
+    auto *case_block = block("indirect.target");
+    dispatch->addCase(ir_.getInt32(index.pc), case_block);
+    ir_.SetInsertPoint(case_block);
     if (index.continuation_only) {
       exit(values, Signal::unsupported, target);
     } else {
@@ -491,9 +497,9 @@ void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
     if (transition.source_variant != variant_.id || indices_.contains(transition.address)) {
       continue;
     }
-    auto *destination = block("variant.target");
-    dispatch->addCase(ir_.getInt32(transition.address), destination);
-    ir_.SetInsertPoint(destination);
+    auto *case_block = block("variant.target");
+    dispatch->addCase(ir_.getInt32(transition.address), case_block);
+    ir_.SetInsertPoint(case_block);
     edge(values, transition.address);
   }
   ir_.SetInsertPoint(unknown);
@@ -588,6 +594,7 @@ void Lowering::analyze() {
     tails_.push_back(join("bound.tail"));
   }
   admission_paths();
+  analyze_calls();
 }
 
 void Lowering::admission_paths() {
@@ -637,7 +644,7 @@ void Lowering::branch_instruction(const Instruction &instruction, Values values)
   values.cycles = ir_.CreateAdd(values.cycles, c64(3));
   if (instruction.exchange) {
     transfer(values, c32(instruction.target), true);
-  } else {
+  } else if (!inline_call(instruction, values)) {
     edge(values, instruction.target);
   }
 }
@@ -776,9 +783,9 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
   abort_base_ = nullptr;
   values = merged.values;
   if (instruction.terminates) {
-    transfer(values,
-             values.r[15],
-             instruction.operation != Operation::alu && instruction.operation != Operation::branch);
+    return_transfer(values,
+                    instruction.operation != Operation::alu &&
+                        instruction.operation != Operation::branch);
   }
 }
 

@@ -79,6 +79,13 @@ These rules come from whole-instrument measurements of the Blofeld emulator
    retired arithmetically up to the run bound; keep the lowering able to prove a
    pass is a fixed point (blofeld-src #35).
 
+Known forward ARM BL leaf calls specialize their body in the caller's SSA flow.
+The actual LR or loaded return PC is checked against the link the caller produced;
+a mismatch leaves through a cold owner exit with ordinary destination validation.
+The caller's forward-path proof covers the specialized body. Near-bound resumes,
+other entries and unqualified callees retain the shared prepared blocks. There is
+no instruction-count cutoff or hidden runtime call stack.
+
 Hoist checks only with a valid alias or permission proof. Keep the host stack
 bounded across guest loops. Host SIMD is used only where guest dependencies and
 the numerical contract are proved and the benefit is measured.

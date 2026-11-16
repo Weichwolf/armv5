@@ -11,7 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(armv5 STATIC src/core.cpp src/decode.cpp src/image.cpp src/native.cpp
-  src/lower.cpp src/alu.cpp src/memory.cpp src/dsp.cpp src/thumb.cpp)
+  src/lower.cpp src/alu.cpp src/memory.cpp src/dsp.cpp src/thumb.cpp src/flow.cpp)
 target_include_directories(armv5 SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_link_libraries(armv5 PRIVATE LLVM)
 add_library(armv5::core ALIAS armv5)
@@ -27,7 +27,7 @@ set_target_properties(armv5 PROPERTIES CXX_EXTENSIONS OFF EXPORT_NAME core)
 set(ARMV5_PREPARATION_INPUTS CMakeLists.txt include/armv5/core.hpp
   include/armv5/memory.hpp src/core.cpp src/decode.cpp src/decode.hpp src/identity.hpp.in src/image.cpp
   src/image.hpp src/native.cpp src/runtime.hpp src/lower.cpp src/lower.hpp
-  src/alu.cpp src/memory.cpp src/dsp.cpp src/thumb.cpp)
+  src/alu.cpp src/memory.cpp src/dsp.cpp src/thumb.cpp src/flow.cpp)
 set(ARMV5_INPUT_HASHES "")
 foreach(input IN LISTS ARMV5_PREPARATION_INPUTS)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${input}")
@@ -47,7 +47,7 @@ if(BUILD_TESTING)
     add_test(NAME ${test} COMMAND armv5_${test}_test)
   endforeach()
   target_sources(armv5_isa_test PRIVATE test/isa/modes.cpp test/isa/dsp.cpp test/isa/thumb.cpp)
-  target_sources(armv5_core_test PRIVATE test/core/consumer.cpp test/core/interrupts.cpp)
+  target_sources(armv5_core_test PRIVATE test/core/consumer.cpp test/core/interrupts.cpp test/core/returns.cpp)
   target_include_directories(armv5_core_test SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
   target_link_libraries(armv5_core_test PRIVATE LLVM)
 endif()

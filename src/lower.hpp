@@ -13,6 +13,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Value.h>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -112,6 +113,14 @@ private:
   std::vector<Block> blocks_;
   std::vector<Join> tails_;
   std::map<std::uint32_t, std::size_t> heads_;
+  std::map<std::uint32_t, std::vector<std::size_t>> inline_calls_;
+  std::optional<std::uint32_t> inline_return_;
+  enum class TransferExit : std::uint8_t { within_unit, owner };
+  [[nodiscard]] static bool return_instruction(const Instruction &instruction);
+  void analyze_calls();
+  bool inline_call(const Instruction &instruction, Values values);
+  void return_transfer(Values values, bool exchange);
+  void cold_transfer(Values values, llvm::Value *target);
 
   llvm::Value *c32(std::uint32_t value);
   llvm::Value *c64(std::uint64_t value);
@@ -128,7 +137,10 @@ private:
   void finish_exit(const Values &values, llvm::Value *signal, llvm::Value *address);
   void guard(llvm::Value *valid, const Values &values, Signal signal, llvm::Value *address);
   void signal_guard(const Values &values);
-  void transfer(Values values, llvm::Value *target, bool exchange);
+  void transfer(Values values,
+                llvm::Value *target,
+                bool exchange,
+                TransferExit destination = TransferExit::within_unit);
   void edge(Values values, std::uint32_t target);
   void unknown_target(Values values, llvm::Value *target);
   Values entry_values();
