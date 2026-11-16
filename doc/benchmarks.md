@@ -290,3 +290,68 @@ armv5-e9c3f85aebdfc3d15e8218f7d270481dc80a7a8d6ef06ba8e9dea5a5754f8192-llvm-19.1
 Published increment totals: `src/` 3,710 lines (+53), `test/` 4,326 (+144)
 against the static leaf-call increment. Profile completion and macOS ARM64
 qualification remain open.
+
+
+## Counted-loop turn grant
+
+Fixed-cost natural blocks ending in unconditional SUBS counter,counter,#1 and
+BNE head receive a whole-turn grant from the remaining bounds and counter.
+A zero counter represents 2^32 turns before the loop naturally finishes.
+The eligible body has no other counter or status dependencies: non-S independent
+ALU/MUL/MLA and single transfers qualify. Other shapes retain ordinary prepared
+flow. The same emitter executes every real body instruction. Cold callback,
+fault, yield and code-change exits reconstruct the exact preceding turns,
+counter and SUBS flags; original entries and exact tails finish partial turns.
+No runtime grant continuation or instruction-count cutoff is introduced.
+
+The one bounded experiment compares the preceding PC-yield increment with this
+change. Same host, full-output checks and warm hardware measurement method.
+
+| Metric | K1 before | K1 grant | K5 before | K5 grant |
+|---|---:|---:|---:|---:|
+| Whole-kernel hardware I/GI | 17.080 | 7.941 | 15.398 | 7.808 |
+| Whole-kernel hardware cycles/GI | 4.479 | 2.151 | 3.802 | 2.059 |
+| Interior turn native instructions / 5 GI | 89 | 38 | 77 | 39 |
+| Interior admission/accounting I/GI | 3.600 (18/5) | 0.800 (4/5) | 3.600 (18/5) | 0.800 (4/5) |
+| Native text bytes | 5,898 | 8,097 | 3,359 | 5,424 |
+| Bytes/prepared GI | 210.643 | 289.179 | 305.364 | 493.091 |
+
+Native instruction stepping checks repeated interior turns; the emitted objects
+match the measured text sizes. Admission/accounting here counts the bound tests,
+progress updates and loop decision, excluding grant setup/finalization and guest
+counter arithmetic. It is an interior-turn attribution, not a whole-kernel
+attribution. The full hardware totals include all setup, finalization and tails.
+There are no per-turn run-bound checks inside a grant. The IR accounts the grant
+as turns times cost at exit, but LLVM 19 strength-reduces cold prefix expressions
+into two progress recurrences in the native loop. The measured four instructions
+are those two updates plus compare/branch. No extra pass tuning was added.
+Status reconstruction also leaves the ordinary loop body and contributes to the
+gain. Native code grows because the grant and original resumable paths coexist.
+
+Independent fixtures cover every short instruction/cycle prefix with fixed and
+dynamic memory; zero, one, small, signed-boundary and wrapping counters; exact
+flags; callback observation/yield/refusal after a preceding turn; code alias
+revocation during the second turn; and snapshot replay. The same fixtures pass
+on the preceding library. All three suites, configured static analysis/format,
+offline source export and installed SDK ARM/Thumb/call/counted-loop consumer pass.
+K6 retains the complete Q1.15 output hash, all 34,042 IRQs and 256-cycle bounds.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.941 | 2.151 | 0.526421 | 1899.622 | 6.710x | 0.109421 | 8,097 | 289.179 |
+| K2 | 6.167 | 1.704 | 0.416768 | 2399.414 | 3.091x | 0.247634 | 16,168 | 234.319 |
+| K3 | 5.408 | 1.413 | 0.345733 | 2892.404 | 0.919x | 0.232102 | 16,833 | 267.190 |
+| K4 | 12.321 | 3.134 | 0.766658 | 1304.363 | 12.526x | 0.728462 | 21,799 | 382.439 |
+| K5 | 7.808 | 2.059 | 0.516448 | 1936.305 | 39.242x | 0.075814 | 5,424 | 493.091 |
+| K6 | 12.378 | 3.744 | 0.934480 | 1070.114 | 11.909x | 0.117793 | 8,772 | 292.400 |
+
+All guest instructions/base cycles per sample are unchanged from A4; native
+guest-instruction share remains 100%.
+
+```text
+armv5-b51947cc288d967fe589d2bc4816779c50ec4f3c8642dd05d5c81565b3c313ac-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Published increment totals: `src/` 3,877 lines (+167), `test/` 4,607 (+281)
+against the PC-yield increment. A5/profile completion, CoreMark and final
+sanitizer qualification remain open. macOS ARM64 remains untested.

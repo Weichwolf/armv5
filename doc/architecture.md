@@ -86,6 +86,14 @@ The caller's forward-path proof covers the specialized body. Near-bound resumes,
 other entries and unqualified callees retain the shared prepared blocks. There is
 no instruction-count cutoff or hidden runtime call stack.
 
+Fixed-cost counted blocks ending in SUBS counter,counter,#1 / BNE head may
+receive a whole-turn grant from the remaining instruction and cycle bounds.
+Eligibility excludes all other counter and flag dependencies. The same emitter
+executes each real body; cold prefixes reconstruct preceding counter/flags and
+progress from completed turns. The grant adds no runtime continuation state.
+Original blocks and exact tails finish partial turns and remain resumable at
+every original PC. This transformation has no instruction-count cutoff.
+
 Hoist checks only with a valid alias or permission proof. Keep the host stack
 bounded across guest loops. Host SIMD is used only where guest dependencies and
 the numerical contract are proved and the benefit is measured.

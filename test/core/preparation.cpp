@@ -286,6 +286,7 @@ int main() {
     consumer_binding();
     interrupts();
     call_returns();
+    counted_loops();
     std::cout << "Installed image lifecycle, cache, callbacks and alias transitions passed\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

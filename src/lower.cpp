@@ -339,7 +339,8 @@ void Lowering::jump(Join &destination, const Values &values) {
   ir_.CreateBr(destination.block);
 }
 
-void Lowering::materialize(const Values &values) {
+void Lowering::materialize(const Values &input) {
+  const auto values = observable_values(input);
   for (unsigned index = 0; index < values.r.size(); ++index) {
     store(values.r[index], offsetof(Runtime, r) + (index * sizeof(std::uint32_t)));
   }
@@ -358,7 +359,7 @@ void Lowering::finish_exit(const Values &values, llvm::Value *signal, llvm::Valu
   auto *source = ir_.GetInsertBlock();
   llvm::cast<llvm::PHINode>(exit_signal_)->addIncoming(signal, source);
   llvm::cast<llvm::PHINode>(exit_address_)->addIncoming(address, source);
-  auto saved = values;
+  auto saved = observable_values(values);
   if (abort_base_ != nullptr) {
     saved.r[abort_register_] =
         ir_.CreateSelect(ir_.CreateICmpEQ(signal, c32(static_cast<unsigned>(Signal::data_abort))),
@@ -809,6 +810,7 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
 
 void Lowering::emit_block(Block &body) {
   ir_.SetInsertPoint(body.head.block);
+  loop_grant(body);
   auto values = body.head.values;
   auto *fits = ir_.CreateAnd(
       ir_.CreateICmpULE(c64(body.ahead_instructions),

@@ -17,6 +17,7 @@
 void processor_modes();
 void interrupts();
 void call_returns();
+void counted_loops();
 
 namespace fixture {
 inline constexpr std::uint32_t user_mode = 0x10, fiq_mode = 0x11, irq_mode = 0x12,

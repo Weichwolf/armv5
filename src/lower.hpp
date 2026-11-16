@@ -132,7 +132,19 @@ private:
   Join join(const llvm::Twine &name);
   static void incoming(Join &destination, const Values &values, llvm::BasicBlock *source);
   void jump(Join &destination, const Values &values);
-  void materialize(const Values &values);
+
+  struct LoopPrefix {
+    unsigned counter;
+    std::uint64_t instructions, cycles;
+    llvm::Value *completed;
+  };
+
+  std::optional<LoopPrefix> loop_prefix_;
+  Values observable_values(Values values);
+  llvm::Value *decrement_flags(llvm::Value *status, llvm::Value *result);
+  [[nodiscard]] std::optional<unsigned> loop_counter(const Block &body) const;
+  void loop_grant(const Block &body);
+  void materialize(const Values &input);
   void exit(const Values &values, Signal signal, llvm::Value *address);
   void finish_exit(const Values &values, llvm::Value *signal, llvm::Value *address);
   void guard(llvm::Value *valid, const Values &values, Signal signal, llvm::Value *address);
