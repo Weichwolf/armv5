@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
+@PACKAGE_INIT@
+include("${CMAKE_CURRENT_LIST_DIR}/armv5Targets.cmake")
+check_required_components(armv5)

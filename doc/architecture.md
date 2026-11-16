@@ -1,8 +1,9 @@
 # Target architecture
 
-This is the implementation target, not a claim of existing code. The initial
-repository contains project instructions, architecture/verification plans and
-reference materials. No Core API, decoder or lowering is implemented yet.
+This is the implementation target, not a completeness claim. A1 provides the
+public Core API declarations, ARM preparation decoder and strict build targets.
+LLVM lowering and native execution remain unimplemented; see
+[isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text
 consumer: CodeImage + CompileOptions -> Core::lower -> SemanticImage (LLVM bitcode)

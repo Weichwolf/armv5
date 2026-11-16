@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+#include <string_view>
+namespace armv5::detail {
+inline constexpr std::string_view compiler_identity =
+    "armv5-@ARMV5_SOURCE_ID@"
+    "-llvm-@LLVM_PACKAGE_VERSION@";
+}

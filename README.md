@@ -1,45 +1,46 @@
 # armv5
 
-Independent ARMv5 native JIT project, initially targeting the ARM926EJ-S
-programmer-visible profile.
+Independent ARMv5 native translation library, initially targeting the ARM926EJ-S
+programmer-visible profile. C++23, LLVM 19, GPL-3.0-only.
 
-Target implementation: C++23, LLVM 19, Linux x86-64 and macOS ARM64,
-GPL-3.0-only. The library follows the Core/Memory/Io ownership model of the
-adjacent cpu12 and dsp56300 projects. See [OBJECTIVE.md](OBJECTIVE.md) for
-acceptance and [doc/architecture.md](doc/architecture.md) for the target design.
+A1 supplies the two public headers, build/package targets, ARM preparation decoder
+and independent encoding fixtures. **Native execution is not implemented yet.**
+Preparation refuses every operation with image identity, address and reason;
+there is no interpreter fallback. See [coverage](doc/isa-coverage.md),
+[API status](doc/api.md), [objective](OBJECTIVE.md) and
+[target architecture](doc/architecture.md).
 
-## Current state
+## Build and verify
 
-This is a project and documentation seed. No CPU decoder, execution engine,
-public Core API, CMake library target or performance result is implemented yet.
-All execution coverage is explicitly unimplemented in
-[doc/isa-coverage.md](doc/isa-coverage.md).
-
-## Reference material
-
-Read [doc/references.md](doc/references.md). Manufacturer PDFs and extracted text
-are kept locally under ignored doc/local/; their origins, revisions, byte lengths
-and SHA-256 identities are recorded in doc/reference-manifest.json.
+Install Clang/LLVM 19 development packages, CMake and Ninja. Production builds and
+tests are offline and require no manuals or manufacturer program bytes.
 
 ```sh
-python3 tools/references.py verify
-python3 tools/references.py fetch
-python3 tools/references.py text
+cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-19 \
+  -DCMAKE_C_COMPILER=clang-19 -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure --no-tests=error
+clang-format-19 --dry-run --Werror include/armv5/*.hpp src/*.cpp src/*.hpp \
+  test/support/*.hpp test/isa/*.cpp test/core/*.cpp
+clang-tidy-19 -p build src/core.cpp src/decode.cpp \
+  test/core/preparation.cpp test/isa/preparation.cpp
+cmake --install build --prefix /your/prefix
 ```
 
-Verification is offline. Fetch downloads missing pinned copies; text requires
-pdftotext. These commands inspect reference material and do not execute firmware
-or test an instruction set. Manuals are not production-build inputs.
+Consumers use `find_package(armv5 CONFIG REQUIRED)` and link `armv5::core`.
+Linux x86-64 preparation is validated; macOS ARM64 remains untested.
+Implementation follows milestones A1–A5 in Weichwolf/lead-a1-src#2. Installed-image
+ISA execution, cacheable LLVM artifacts and K4/K5 begin in A2; exceptions/K6 in A3;
+Thumb/DSP/K1–K3 in A4; the ARM926 memory system in A5. Hardware user counters are
+accessible on the development host; kernel benchmark results do not exist yet.
 
-## Implementation order
+## References
 
-1. Establish the complete profile/encoding inventory and independent fixtures.
-2. Add the minimal architectural state/memory API and real strict build targets.
-3. Implement native lowering on both hosts with independent ISA/core/JIT checks.
-4. Complete faults, interrupts, numerical modes and code/mapping coherence.
-5. Measure checked continuous workloads and integrate through consumer-owned I/O.
-
-Device firmware, peripheral models, audio scheduling and application code remain
-in consumers. The separate Nord firmware reconstruction remains paused.
+[Reference origins and pinned identities](doc/references.md) are recorded in
+`doc/reference-manifest.json`. PDFs and extracted text remain ignored locally;
+`python3 tools/references.py verify` checks them without network access. They are
+not build inputs or test assets. Device firmware, clocks, peripherals, scheduling
+and multi-core coupling belong to consumers. The firmware reconstruction remains
+paused.
 
 [License](LICENSE) | [Provenance](THIRD_PARTY.txt)
