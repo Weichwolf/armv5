@@ -166,6 +166,137 @@ void callback_prefix() {
   replay(machine, ram);
 }
 
+enum class PcLoad : std::uint8_t { single, multiple, exception, thumb_pop };
+constexpr std::uint32_t arm_destination = 0x1100, thumb_destination = 0x1200,
+                        callback_high = 0x87654321, initial_high = 0x11223344,
+                        fiq_high = 0x55667788, saved_flags = 0xa8000000;
+
+struct PcCallback {
+  armv5::Core *cpu = nullptr;
+  bool multiple;
+  std::uint32_t target;
+  std::vector<armv5::State> prefixes;
+
+  static bool
+  read(void *owner, std::uint32_t address, unsigned width, std::uint32_t &out) noexcept {
+    auto &self = *static_cast<PcCallback *>(owner);
+    if (width != 4 || address < callback_address || address - callback_address > 4) {
+      return false;
+    }
+    self.prefixes.push_back(self.cpu->state());
+    self.cpu->request_yield();
+    out = self.multiple && address == callback_address ? callback_high : self.target;
+    return true;
+  }
+};
+
+fixture::Program pc_load_program(PcLoad form) {
+  constexpr std::uint32_t load_multiple = 0xe8b08100;
+  constexpr std::uint32_t restore_spsr = 0x00400000;
+  constexpr std::uint16_t pop_pc = 0xbd00;
+  fixture::Program code;
+  switch (form) {
+    case PcLoad::single: code.word(fixture::transfer(true, false, 15, 0, 4, false)); break;
+    case PcLoad::multiple: code.word(load_multiple); break; // LDMIA R0!,{R8,PC}.
+    case PcLoad::exception: code.word(load_multiple | restore_spsr); break;
+    case PcLoad::thumb_pop: code.half(pop_pc); break;
+  }
+  return code;
+}
+
+armv5::State pc_yield_expected(armv5::State expected, PcLoad form, std::uint32_t target) {
+  const bool multiple = form == PcLoad::multiple || form == PcLoad::exception;
+  const bool pop = form == PcLoad::thumb_pop;
+  expected.registers.r[pop ? 13 : 0] += multiple ? 8 : 4;
+  if (pop) { expected.banks.supervisor[0] += 4; }
+  expected.registers.r[15] = target & ((target & 1) != 0 ? ~std::uint32_t{1} : ~std::uint32_t{3});
+  if (multiple) {
+    expected.registers.r[8] = callback_high;
+    expected.banks.user[0] = callback_high;
+  }
+  if (form == PcLoad::exception) {
+    expected.registers.cpsr = expected.registers.spsr;
+    expected.banks.spsr[2] = expected.registers.spsr;
+    expected.registers.spsr = 0;
+    expected.registers.r[8] = fiq_high;
+  } else {
+    expected.registers.cpsr = (expected.registers.cpsr & ~0x20U) | ((target & 1) != 0 ? 0x20 : 0);
+  }
+  expected.progress = {.instructions = 1, .base_cycles = multiple ? 6U : 5U};
+  expected.execution = armv5::ExecutionState::yielded;
+  return expected;
+}
+
+void pc_yield(PcLoad form, std::uint32_t target, unsigned budget, bool cycle_bound = false) {
+  const bool pop = form == PcLoad::thumb_pop;
+  const bool multiple = form == PcLoad::multiple || form == PcLoad::exception;
+  PcCallback callback{.multiple = multiple, .target = target, .prefixes = {}};
+  const auto code = pc_load_program(form);
+  fixture::Program arm(arm_destination);
+  fixture::Program thumb(thumb_destination);
+  constexpr std::uint16_t move_r1 = 0x2103;
+  constexpr std::uint16_t bl_prefix = 0xf000;
+  constexpr std::uint16_t bl_suffix = 0xf800;
+  arm.word(fixture::data(13, false, 1, 0, true, 3));
+  thumb.half(move_r1); // MOVS R1,#3, then a BL pair whose suffix rejects branch entry.
+  thumb.half(bl_prefix);
+  thumb.half(bl_suffix);
+  fixture::Modes machine({{.program = code,
+                           .modes = {fixture::supervisor_mode},
+                           .instruction_set = pop ? armv5::CodeSpan::InstructionSet::thumb
+                                                  : armv5::CodeSpan::InstructionSet::arm},
+                          {.program = arm, .modes = {fixture::supervisor_mode, fixture::fiq_mode}},
+                          {.program = thumb,
+                           .modes = {fixture::supervisor_mode, fixture::fiq_mode},
+                           .instruction_set = armv5::CodeSpan::InstructionSet::thumb}},
+                         {},
+                         true,
+                         0x10000,
+                         {.owner = &callback, .read = &PcCallback::read});
+  callback.cpu = machine.core.get();
+  auto registers = machine.core->registers();
+  registers.cpsr = fixture::fiq_mode;
+  registers.r[8] = fiq_high;
+  machine.core->set_registers(registers);
+  registers.cpsr = armv5::Registers::reset_cpsr | (pop ? 0x20 : 0);
+  registers.r[pop ? 13 : 0] = callback_address;
+  registers.r[8] = initial_high;
+  registers.spsr = saved_flags | fixture::fiq_mode | ((target & 1) != 0 ? 0x20 : 0);
+  machine.core->set_registers(registers);
+  auto callback_expected = machine.core->state();
+  auto expected = pc_yield_expected(callback_expected, form, target);
+  const bool invalid = target == thumb_destination + 5 && form != PcLoad::exception;
+  const bool missing = target == undeclared || target == undeclared + 1;
+  const bool refused = invalid || (missing && ((target & 1) != 0 || budget > 1));
+  const auto result = cycle_bound ? machine.core->run_until(budget) : machine.core->run(budget);
+  fixture::require(callback.prefixes.size() == (multiple ? 2U : 1U) &&
+                       callback.prefixes[0] == callback_expected,
+                   "PC callback observes pre-instruction state");
+  if (multiple) {
+    callback_expected.registers.r[8] = callback_high;
+    callback_expected.banks.user[0] = callback_high;
+    fixture::require(callback.prefixes[1] == callback_expected,
+                     "yield waits for all LDM accesses and exposes exact partial loads");
+  }
+  if (refused) {
+    expected.execution = armv5::ExecutionState::fault;
+    expected.fault = result.fault;
+    fixture::require(result.fault.kind == (invalid ? armv5::Fault::Kind::unsupported
+                                                   : armv5::Fault::Kind::unprepared),
+                     "yield retains ordinary branch destination validation");
+  }
+  fixture::require(machine.core->state() == expected && result.progress == expected.progress,
+                   "yield completes PC alignment, interworking, bank changes and SPSR restore");
+  const auto snapshot = machine.core->save();
+  (void)machine.core->run(1);
+  const auto after = machine.core->state();
+  machine.core->restore(snapshot);
+  fixture::require(machine.core->state() == expected,
+                   "PC yield snapshot retains complete boundary");
+  (void)machine.core->run(1);
+  fixture::require(machine.core->state() == after, "PC yield snapshot replay");
+}
+
 void predicated_call(bool taken) {
   fixture::Modes machine(
       {{.program = program(ReturnForm::bx, 0), .modes = {fixture::supervisor_mode}}});
@@ -186,6 +317,17 @@ void predicated_call(bool taken) {
 }
 
 void call_returns() {
+  for (const auto form : {PcLoad::single, PcLoad::multiple, PcLoad::exception, PcLoad::thumb_pop}) {
+    for (const auto target : {arm_destination + 2, thumb_destination + 1, thumb_destination + 5}) {
+      pc_yield(form, target, 1);
+      pc_yield(form, target, 16);
+      pc_yield(form, target, 1, true);
+    }
+  }
+  for (const auto target : {undeclared, undeclared + 1}) {
+    pc_yield(PcLoad::single, target, 1);
+    pc_yield(PcLoad::single, target, 16);
+  }
   callback_prefix();
   predicated_call(false);
   predicated_call(true);

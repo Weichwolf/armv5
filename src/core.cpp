@@ -213,6 +213,35 @@ struct Core::Impl {
       return true;
     }
     switch (signal) {
+      case detail::Signal::yielded_exchange: {
+        runtime.cpsr = runtime.address;
+        runtime.r[15] &= (runtime.cpsr & thumb_bit) != 0 ? ~std::uint32_t{1} : ~std::uint32_t{3};
+        // Validate the new state/target exactly as an ordinary interworking
+        // branch does at a bound, without executing a destination instruction.
+        const auto entry = mode_entries[runtime.cpsr & (mode_bits | thumb_bit)];
+        if (entry == nullptr) {
+          runtime.signal = static_cast<std::uint32_t>(detail::Signal::unsupported);
+          runtime.address = runtime.r[15];
+          return false;
+        }
+        const auto instruction_bound = runtime.instruction_bound;
+        const auto cycle_bound = runtime.cycle_bound;
+        runtime.instruction_bound = runtime.instructions;
+        runtime.cycle_bound = runtime.cycles;
+        runtime.signal = static_cast<std::uint32_t>(detail::Signal::exchange);
+        entry(&runtime);
+        runtime.instruction_bound = instruction_bound;
+        runtime.cycle_bound = cycle_bound;
+        if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::none)) {
+          runtime.signal = static_cast<std::uint32_t>(detail::Signal::yielded);
+        }
+        return false;
+      }
+      case detail::Signal::yielded_exception_return:
+        change_status(runtime.address);
+        runtime.r[15] &= (runtime.cpsr & thumb_bit) != 0 ? ~std::uint32_t{1} : ~std::uint32_t{3};
+        runtime.signal = static_cast<std::uint32_t>(detail::Signal::yielded);
+        return false;
       case detail::Signal::redispatch:
         runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
         return true;

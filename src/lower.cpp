@@ -384,12 +384,22 @@ void Lowering::guard(llvm::Value *valid,
   ir_.SetInsertPoint(ordinary);
 }
 
-void Lowering::signal_guard(const Values &values) {
+void Lowering::signal_guard(const Instruction &instruction,
+                            Values values,
+                            llvm::Value *old_status) {
   auto *ordinary = block("continue");
   auto *cold = block("event");
   cold_branch(ir_.CreateICmpEQ(pending_signal_, c32(0)), ordinary, cold);
   ir_.SetInsertPoint(cold);
-  finish_exit(values, pending_signal_, load(ir_.getInt32Ty(), offsetof(Runtime, address)));
+  // A successful PC load still owes its architectural branch/exception return.
+  // Faulting accesses have already left before retirement in slow_access.
+  if (instruction.terminates) {
+    if (!emit_event(instruction, values, old_status, true)) {
+      transfer(values, values.r[15], true, TransferExit::yielded);
+    }
+  } else {
+    finish_exit(values, pending_signal_, load(ir_.getInt32Ty(), offsetof(Runtime, address)));
+  }
   ir_.SetInsertPoint(ordinary);
 }
 
@@ -411,7 +421,7 @@ Values Lowering::entry_values() {
   return values;
 }
 
-void Lowering::unknown_target(Values values, llvm::Value *target) {
+void Lowering::unknown_target(Values values, llvm::Value *target, Signal bound_signal) {
   values.r[15] = target;
   auto *bound = block("bound");
   auto *missing = block("missing");
@@ -420,7 +430,7 @@ void Lowering::unknown_target(Values values, llvm::Value *target) {
                    bound,
                    missing);
   ir_.SetInsertPoint(bound);
-  exit(values, Signal::none, target);
+  exit(values, bound_signal, target);
   ir_.SetInsertPoint(missing);
   exit(values, Signal::unprepared, target);
 }
@@ -462,12 +472,16 @@ void Lowering::transfer(Values values,
     next.r[15] = target;
     auto *status = ir_.CreateOr(ir_.CreateAnd(values.status, c32(~thumb_bit)),
                                 ir_.CreateSelect(next_thumb, c32(thumb_bit), c32(0)));
-    exit(next, Signal::exchange, status);
+    exit(next,
+         destination == TransferExit::yielded ? Signal::yielded_exchange : Signal::exchange,
+         status);
     ir_.SetInsertPoint(ordinary);
   }
   target = ir_.CreateAnd(target, c32(thumb_ ? ~std::uint32_t{1} : arm_pc_mask));
-  if (destination == TransferExit::owner) {
-    cold_transfer(values, target);
+  if (destination != TransferExit::within_unit) {
+    cold_transfer(values,
+                  target,
+                  destination == TransferExit::yielded ? Signal::yielded : Signal::redispatch);
     return;
   }
   if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(target)) {
@@ -649,7 +663,10 @@ void Lowering::branch_instruction(const Instruction &instruction, Values values)
   }
 }
 
-bool Lowering::emit_event(const Instruction &instruction, Values &values, llvm::Value *old_status) {
+bool Lowering::emit_event(const Instruction &instruction,
+                          Values &values,
+                          llvm::Value *old_status,
+                          bool yielded) {
   const bool mode_change = instruction.operation == Operation::msr && instruction.terminates;
   if (exception_return(instruction) || mode_change) {
     auto *status = mode_change ? values.status : values.spsr;
@@ -673,7 +690,8 @@ bool Lowering::emit_event(const Instruction &instruction, Values &values, llvm::
     guard(valid, refused, Signal::unsupported, c32(instruction.pc));
     values.status = old_status;
     if (mode_change) { values.r[15] = c32(instruction.next()); }
-    exit(values, mode_change ? Signal::status : Signal::exception_return, status);
+    const auto returning = yielded ? Signal::yielded_exception_return : Signal::exception_return;
+    exit(values, mode_change ? Signal::status : returning, status);
     return true;
   }
   if (instruction.operation == Operation::software_interrupt ||
@@ -776,7 +794,7 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
   values.cycles = ir_.CreateAdd(values.cycles, c64(instruction.cycles));
   if (instruction.operation == Operation::single || instruction.operation == Operation::extra ||
       instruction.operation == Operation::multiple || instruction.operation == Operation::swap) {
-    signal_guard(values);
+    signal_guard(instruction, values, old_status);
   }
   if (!emit_event(instruction, values, old_status)) { jump(merged, values); }
   ir_.SetInsertPoint(merged.block);

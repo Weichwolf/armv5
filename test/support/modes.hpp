@@ -44,7 +44,8 @@ public:
   explicit Modes(std::vector<ModeProgram> code,
                  std::vector<std::uint32_t> declared_vectors = {},
                  bool fixed = true,
-                 std::size_t ram_size = 0x10000)
+                 std::size_t ram_size = 0x10000,
+                 armv5::Io callbacks = {})
       : programs(std::move(code)), ram(ram_size), vectors(std::move(declared_vectors)) {
     storage.reserve(programs.size());
     for (auto &item : programs) {
@@ -79,7 +80,8 @@ public:
                                  .transitions = {},
                                  .interrupt_vectors = vectors};
     native.emplace(armv5::Core::compile(image));
-    core = std::make_unique<armv5::Core>(armv5::Memory{.regions = regions, .generation = 0});
+    core = std::make_unique<armv5::Core>(armv5::Memory{.regions = regions, .generation = 0},
+                                         callbacks);
     (void)core->install(*native, 0);
     auto initial = core->registers();
     initial.r[15] = programs.front().program.address();

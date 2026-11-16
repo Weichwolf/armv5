@@ -115,12 +115,12 @@ private:
   std::map<std::uint32_t, std::size_t> heads_;
   std::map<std::uint32_t, std::vector<std::size_t>> inline_calls_;
   std::optional<std::uint32_t> inline_return_;
-  enum class TransferExit : std::uint8_t { within_unit, owner };
+  enum class TransferExit : std::uint8_t { within_unit, owner, yielded };
   [[nodiscard]] static bool return_instruction(const Instruction &instruction);
   void analyze_calls();
   bool inline_call(const Instruction &instruction, Values values);
   void return_transfer(Values values, bool exchange);
-  void cold_transfer(Values values, llvm::Value *target);
+  void cold_transfer(Values values, llvm::Value *target, Signal prepared = Signal::redispatch);
 
   llvm::Value *c32(std::uint32_t value);
   llvm::Value *c64(std::uint64_t value);
@@ -136,13 +136,13 @@ private:
   void exit(const Values &values, Signal signal, llvm::Value *address);
   void finish_exit(const Values &values, llvm::Value *signal, llvm::Value *address);
   void guard(llvm::Value *valid, const Values &values, Signal signal, llvm::Value *address);
-  void signal_guard(const Values &values);
+  void signal_guard(const Instruction &instruction, Values values, llvm::Value *old_status);
   void transfer(Values values,
                 llvm::Value *target,
                 bool exchange,
                 TransferExit destination = TransferExit::within_unit);
   void edge(Values values, std::uint32_t target);
-  void unknown_target(Values values, llvm::Value *target);
+  void unknown_target(Values values, llvm::Value *target, Signal bound = Signal::none);
   Values entry_values();
   Instruction thumb_instruction(std::uint32_t pc, std::uint16_t word);
   void read_code();
@@ -152,7 +152,10 @@ private:
   void admission_paths();
   void emit_block(Block &body);
   void emit_tail(std::size_t index);
-  bool emit_event(const Instruction &instruction, Values &values, llvm::Value *old_status);
+  bool emit_event(const Instruction &instruction,
+                  Values &values,
+                  llvm::Value *old_status,
+                  bool yielded = false);
   void emit_instruction(const Instruction &instruction, Values &values);
   void branch_instruction(const Instruction &instruction, Values values);
   llvm::Value *condition(unsigned code, llvm::Value *status);

@@ -96,7 +96,8 @@ or callbacks; the core owns no multi-core scheduler or peripheral model.
 
 Io callbacks run synchronously and do not throw. False is an explicit fault.
 Callbacks may inspect the exact prefix and call `request_yield`; a yield completes
-the current instruction before returning. Other mutations and execution reentry
+the current instruction before returning, including a loaded PC, interworking
+or SPSR/banked-register restoration. Other mutations and execution reentry
 are rejected. An atomic swap uses one swap callback, not separate read/write I/O.
 Callback bindings replace an Io role with a symbol in consumer-linked IR; the
 bitcode declares the corresponding Io function signature. The consumer test

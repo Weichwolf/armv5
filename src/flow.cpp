@@ -76,7 +76,7 @@ void Lowering::return_transfer(Values values, bool exchange) {
   transfer(values, values.r[15], exchange, TransferExit::owner);
 }
 
-void Lowering::cold_transfer(Values values, llvm::Value *target) {
+void Lowering::cold_transfer(Values values, llvm::Value *target, Signal prepared_signal) {
   values.r[15] = target;
   auto *missing = block("unexpected.return.missing");
   auto *prepared = block("unexpected.return.prepared");
@@ -96,10 +96,11 @@ void Lowering::cold_transfer(Values values, llvm::Value *target) {
     exit(values, Signal::transfer, target);
   }
   ir_.SetInsertPoint(prepared);
-  exit(values, Signal::redispatch, target);
+  exit(values, prepared_signal, target);
   ir_.SetInsertPoint(invalid);
   exit(values, Signal::unsupported, target);
   ir_.SetInsertPoint(missing);
-  unknown_target(values, target);
+  unknown_target(
+      values, target, prepared_signal == Signal::yielded ? Signal::yielded : Signal::none);
 }
 } // namespace armv5::detail

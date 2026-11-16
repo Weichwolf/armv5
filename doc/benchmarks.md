@@ -249,3 +249,44 @@ Validation: strict Release and all three suites, configured static analysis,
 formatting, offline source export and an installed SDK consumer executing
 ARM/Thumb and repeated static calls. This experiment does not complete the
 profile; the open work in `isa-coverage.md` remains.
+
+
+## PC-load completion before callback yield
+
+A successful yielding ARM LDR/LDM PC or Thumb POP PC now completes its branch
+before returning. LDM with SPSR restore also completes the status and bank change.
+State-changing branches retain destination validation at the bound; exception
+returns may resume a saved Thumb BL suffix. No destination instruction executes
+before the yield. Failed callbacks still leave through the existing access-fault
+path before retirement.
+
+Independent public-interface fixtures check full state, both LDM callback
+prefixes, writeback, alignment, interworking, SPSR/FIQ bank restoration, rejected
+BL suffix entry, missing targets, instruction/cycle bounds and snapshot replay.
+The new regression fails on the preceding library. Strict build, all three
+suites, configured static analysis/format, offline source build and installed SDK
+consumer pass. The standalone installed PC-yield reproducer now returns the
+aligned Thumb target after exactly one instruction/five cycles.
+
+Same host, warm method and per-thread hardware counters as above. All six
+complete outputs pass; guest instructions/base cycles per sample are unchanged.
+The small K6 instruction-count increase is owner exit handling; K4 allocation
+changes with the additional cold branch paths. This is a correctness fix, with
+no further transfer tuning.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 17.080 | 4.479 | 1.098361 | 910.447 | 12.854x | 0.081362 | 5,898 | 210.643 |
+| K2 | 6.167 | 1.677 | 0.410754 | 2434.548 | 3.045x | 0.248028 | 16,168 | 234.319 |
+| K3 | 6.370 | 1.644 | 0.401997 | 2487.580 | 1.073x | 0.194724 | 13,110 | 208.095 |
+| K4 | 12.321 | 3.130 | 0.765446 | 1306.427 | 12.523x | 0.724187 | 21,799 | 382.439 |
+| K5 | 15.398 | 3.802 | 0.953119 | 1049.187 | 71.612x | 0.039611 | 3,359 | 305.364 |
+| K6 | 20.936 | 6.090 | 1.493577 | 669.534 | 18.869x | 0.092169 | 6,795 | 226.500 |
+
+```text
+armv5-e9c3f85aebdfc3d15e8218f7d270481dc80a7a8d6ef06ba8e9dea5a5754f8192-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Published increment totals: `src/` 3,710 lines (+53), `test/` 4,326 (+144)
+against the static leaf-call increment. Profile completion and macOS ARM64
+qualification remain open.
