@@ -1,8 +1,9 @@
 # Target architecture
 
 This is the implementation target, not a completeness claim. A1 provides the
-public Core API declarations, ARM preparation decoder and strict build targets.
-LLVM lowering and native execution remain unimplemented; see
+public Core API, preparation decoder and strict build targets. A2 now has direct
+SSA LLVM execution, cacheable preparation and checked K4/K5 kernels; profile
+completion remains open. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text

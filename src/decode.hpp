@@ -6,13 +6,7 @@
 
 namespace armv5::detail {
 
-// Decoding is preparation-only. A name identifies a semantic operation, not an
-// execution helper. Register fields remain in the original instruction word.
-struct Decoded {
-  std::uint32_t word;
-  std::string_view operation;
-};
-
-[[nodiscard]] Decoded decode_arm(std::uint32_t word);
+// Preparation-only classification; the caller retains the original word.
+[[nodiscard]] std::string_view decode_arm(std::uint32_t word);
 
 } // namespace armv5::detail

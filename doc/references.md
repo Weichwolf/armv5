@@ -26,6 +26,7 @@ instruction semantics do not implement this target architecture.
 | Document | Revision | Pages | Manufacturer source |
 |---|---|---:|---|
 | ARM926EJ-S Technical Reference Manual | r0p5, 2008 | 236 | [Official reference](https://documentation-service.arm.com/static/5e8e3d1088295d1e18d3a9b2) |
+| ARM9E-S Technical Reference Manual | Rev 1, Issue B, September 2000 | 290 | [Official reference](https://documentation-service.arm.com/static/5e8e2f18fd977155116a77fb) |
 | ARM Architecture Reference Manual | Issue I, 2005 | 1138 | [Official reference](https://documentation-service.arm.com/static/5f8dacc8f86e16515cdb865a) |
 | AM1705 ARM Microprocessor Datasheet | Revision F, January 2017 | 167 | [Official reference](https://www.ti.com/lit/ds/symlink/am1705.pdf) |
 

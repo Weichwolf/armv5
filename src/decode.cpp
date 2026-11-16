@@ -185,8 +185,8 @@ std::string_view operation(std::uint32_t word) {
 
 } // namespace
 
-Decoded decode_arm(std::uint32_t word) {
-  return {.word = word, .operation = operation(word)};
+std::string_view decode_arm(std::uint32_t word) {
+  return operation(word);
 }
 
 } // namespace armv5::detail

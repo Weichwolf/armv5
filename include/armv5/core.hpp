@@ -101,9 +101,11 @@ struct CallbackBinding {
 };
 
 struct CompileOptions {
+  static constexpr std::uint32_t supervisor_mode = 0x13;
   enum class InstructionSet : std::uint8_t { arm, thumb };
   InstructionSet instruction_set = InstructionSet::arm;
   bool big_endian = false;
+  std::uint32_t processor_mode = supervisor_mode; // One CPSR mode per prepared unit.
   std::vector<CallbackBinding> callbacks;
 };
 
@@ -138,6 +140,7 @@ struct NativeSymbols {
   std::span<const Symbol> symbols;
   // Keeps consumer-owned code alive for the lifetime of every installed image.
   std::shared_ptr<const void> lifetime;
+  PreparationReport report;
 };
 
 class NativeImage {

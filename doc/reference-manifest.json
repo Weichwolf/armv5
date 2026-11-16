@@ -47,6 +47,21 @@
       "redistributed": false,
       "local_origin": "Downloaded from official manufacturer URL",
       "provenance": "Exact local identity from direct official download; see SHA-256."
+    },
+    {
+      "title": "ARM9E-S Technical Reference Manual",
+      "file": "arm9e-trm.pdf",
+      "official_url": "https://documentation-service.arm.com/static/5e8e2f18fd977155116a77fb",
+      "source_url": "https://documentation-service.arm.com/static/5e8e2f18fd977155116a77fb",
+      "revision": "Issue B, 2000",
+      "document": "ARM DDI 0165B",
+      "bytes": 1607937,
+      "sha256": "21db45eb339489ce7543e6d63c4ea0db3b6749152e9a51416766246791a0b03f",
+      "pages": 290,
+      "scope": "ARM9E-S instruction base cycle timings and implementation-defined PC behavior",
+      "redistributed": false,
+      "local_origin": "Downloaded directly from the official ARM documentation service",
+      "provenance": "Manufacturer-authored reference for analysis only. Chapter 8 supplies zero-wait-state instruction base costs; interlocks and board clocks are outside the nominal accounting model. Not a build input."
     }
   ]
 }

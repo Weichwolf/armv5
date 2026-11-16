@@ -4,5 +4,5 @@
 namespace armv5::detail {
 inline constexpr std::string_view compiler_identity =
     "armv5-@ARMV5_SOURCE_ID@"
-    "-llvm-@LLVM_PACKAGE_VERSION@";
+    "-llvm-@LLVM_PACKAGE_VERSION@-@LLVM_HOST_TRIPLE@";
 }

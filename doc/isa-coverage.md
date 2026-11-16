@@ -1,44 +1,46 @@
 # ISA and implementation coverage
 
-A1 provides preparation-time ARM operation classification. **No instruction
-executes yet.** `Core::lower` identifies an operation and refuses LLVM lowering;
-invalid encodings fail earlier with image identity and byte address. Classification
-is not semantic coverage and does not yet validate every UNPREDICTABLE operand
-combination. No implemented-profile or performance claim follows from this table.
+A2 currently executes the ARM operations below through prepared LLVM images.
+This is **not** complete ARMv5TEJ qualification. Thumb, banked state, architectural
+exceptions, multiplication/DSP and the ARM926 memory system are still open.
+Tests are independently authored programs, run through the public interface with
+installed images. Rejected preparation cannot produce an installed image and is
+checked through `Core::lower`; no private decoder or alternate executor is used.
 
-Independent authored fixtures: `test/support/isa.hpp`, `test/isa/preparation.cpp`.
-The public preparation interface is the A1 verification boundary specified by
-lead-a1-src#2; installed-image execution starts in A2. No private decoder test API
-or alternate execution path exists.
+| Operation/forms | Current implementation and independent evidence |
+|---|---|
+| ARM AND/EOR/SUB/RSB/ADD/ADC/SBC/RSC/TST/TEQ/CMP/CMN/ORR/MOV/BIC/MVN | Direct SSA; `test/isa/preparation.cpp` checks all 16 operations across signed/unsigned numeric boundaries, carry/borrow/overflow, Q/V preservation, complete visible registers |
+| Operand 2 and shifts | Immediate/rotated-immediate, immediate shift and register-controlled LSL/LSR/ASR/ROR, RRX; counts 0/1/31/32/33/255/256, incoming carry, constant rotation; further encoding combinations remain to qualify |
+| Predication | All 15 ordinary conditions against all 16 NZCV combinations; false memory predicates have no access/writeback effects |
+| B/BL, BX/BLX register, PC | Known successors linked directly; ARM destinations and returns exercised by K4; interior continuations and unknown fallthrough checked by core tests. Thumb destinations and BLX immediate remain A4 work |
+| LDR/STR/LDRB/STRB | Immediate/scaled register offsets, indexing and writeback implemented; public tests cover pre/post up/down access, byte/word, legacy unaligned word rotation, both endiannesses, fixed and dynamic memory paths; K4/K5 check complete memory output |
+| LDRH/STRH/LDRSB/LDRSH/LDRD/STRD | Immediate/register addressing implemented, signed extension and pairs; fixtures cover signed byte/halfword and doubleword loads/stores in both byte orders. Unpredictable alignment and operand combinations explicitly refuse; exhaustive addressing combinations remain open |
+| LDM/STM | Ordinary-bank IA/IB/DA/DB implemented, ordered transfers and writeback; independent stack push/pop fixtures and K4 returns; user-bank and exception-return forms remain A3 work |
+| SWP/SWPB | One atomic I/O callback or one owner RAM transaction; byte/word and legacy alignment implemented, both byte orders checked |
+| MRS/MSR | Visible CPSR/SPSR reads and flags-only CPSR writes; flags/immediate roundtrip checked. Control writes, SPSR writes and exception return remain A3 work |
+| PLD | Advisory hint has no required observable data access; accepted without inventing faults or device reads |
+| Invalid/unsupported encodings | Public preparation diagnostics cover extension collisions, ARMv6 media/exclusive/UMAAL/unconditional control, malformed control fields and explicit unlowered MUL/SWI |
 
-| ARM encoding class | A1 classification fixtures | Execution status |
-|---|---|---|
-| AND/EOR/SUB/RSB/ADD/ADC/SBC/RSC/TST/TEQ/CMP/CMN/ORR/MOV/BIC/MVN | All 15 ordinary conditions, legal S-bit classes, immediate rotate, immediate/register shift, both byte orders | Unimplemented |
-| MUL/MLA, UMULL/UMLAL/SMULL/SMLAL | Every operation class; multiply/extra-transfer collision | Unimplemented |
-| SMLAxy/SMLAWy/SMULWy/SMLALxy/SMULxy | Every operation class; reserved accumulator fields | Unimplemented |
-| QADD/QSUB/QDADD/QDSUB, CLZ | Every operation class; control-extension collision | Unimplemented |
-| MRS/MSR | CPSR/SPSR MRS, register/immediate MSR; malformed reserved field | Unimplemented |
-| LDR/STR/LDRB/STRB | Immediate-offset operation classes; media-space rejection | Unimplemented |
-| LDRH/STRH/LDRSB/LDRSH/LDRD/STRD | Register/immediate classes; reserved offset and post-index encoding rejection | Unimplemented |
-| LDM/STM, SWP/SWPB | Operation classes; exclusive-space rejection | Unimplemented |
-| B/BL, BX/BLX, BXJ | All branch classes, BLX immediate H bit, unconditional collision | Unimplemented |
-| SWI/BKPT | Both operation classes; non-AL BKPT rejection | Unimplemented |
-| PLD | Immediate/register forms; register-shift rejection | Unimplemented |
-| LDC/STC/CDP/MRC/MCR and unconditional forms | Every operation class; coprocessor extension collision | Unimplemented |
-| MCRR/MRRC | Both classes; ARMv6 unconditional forms rejected | Unimplemented |
-| Reserved/version extensions | ARMv6 media/exclusive/UMAAL/CPS/SETEND/RFE, architecturally undefined encoding, malformed control fields | Explicit preparation refusal |
+| Lifecycle area | Evidence/status |
+|---|---|
+| Preparation/cache/binding | Lowered LLVM bitcode, complete checked artifact and load without lowering; missing native symbols and corrupt/mismatched artifacts rejected; consumer-linked IR callback runs through `bind` |
+| Installed code/layout | Actual byte/permission/layout validation; failed install and memory rebind revoke bindings without changing CPU/time |
+| Bounds and state | Exact instruction budgets inside natural blocks, deadline overshoot only at complete boundaries, owner reentry rejection, callback prefix inspection and yield, fault latch, save/restore |
+| Variants and aliases | Native writes through host storage aliases revoke before changed successors; declared destination installation and saved pending-transfer restoration checked |
+| Performance | K4 and K5 check complete outputs and retire over ten million instructions; per-thread user instructions/cycles, throughput, Clang O3 ratio, preparation and text size are measured in `test/bench` |
 
-| Remaining profile area | Required evidence | Status |
-|---|---|---|
-| ARM numerical and memory semantics | Flags/shifter boundaries, PC/SPSR, DSP saturation, writeback overlap, access/fault order, alignment/endian | Unimplemented (A2/A4) |
-| Thumb and interworking | Every classic Thumb form, BL halves, BX/BLX, PC/SP semantics | Unimplemented (A4) |
-| Exceptions and processor modes | All banked registers, CPSR/SPSR, reset, SWI/aborts, IRQ/FIQ, return, waits | Unimplemented (A3) |
-| CP15 and memory system | MMU/FCSE/TLB, permissions/domains, fault registers, maintenance, TCM | Unimplemented (A5) |
-| Jazelle and optional features | BXJ fallback and exception behavior; explicit Java capability | Unimplemented; Java execution unresolved |
-| Native binding and coherency | Artifact load/bind/install, aliases, code/mapping changes, transitions, precise exits, full snapshots | Unimplemented (A2 onward) |
-| Common benchmarks | K1–K6, complete checked outputs, hardware counters, Clang O3 ratios, preparation time and native bytes | Unimplemented |
-| Host qualification | Strict build/format/static analysis on Linux x86-64; generated code and sanitizer qualification at goal | Linux preparation only; macOS ARM64 untested |
+| Mandatory profile work still open | Milestone |
+|---|---|
+| CPSR modes, all banked registers/SPSRs, exception entry/return, reset details, SWI/aborts, IRQ/FIQ, interrupted snapshots and K6 | A3 |
+| All classic Thumb forms, BL halves, ARM/Thumb interworking | A4 |
+| CLZ, multiply/long multiply, E-extension signed halfword multiply and Q arithmetic; K1–K3 | A4 |
+| Coprocessor absence and CP15 register semantics, MMU/FCSE/TLB, domains/permissions/faults, maintenance and TCM | A5 |
+| BXJ documented fallback/exception behavior and explicit Java capability; Java execution unresolved | Open |
+| Exhaustive encoding/operand/addressing qualification, architectural memory-abort ordering and code/mapping edge cases | Open; prevents profile completion |
+| Sanitizer qualification of own and generated code | At goal |
+| macOS ARM64 semantics and counters | Untested; developer host unavailable |
 
-Sources: ARM DDI 0100I A3.1/A3.16 and the individual A4/A5 encodings, selected for
-ARMv5TEJ, not the later architecture additions in that manual. Identities and
-provenance are recorded in `reference-manifest.json`. Manuals are not build inputs.
+Instruction encodings/semantics: ARM DDI 0100I A2–A5, restricted to ARMv5TEJ.
+Profile: DDI 0198E. Nominal cycle accounting: DDI 0165B 8.1, without interlocks or
+bus waits. References and their exact local identities are in
+`reference-manifest.json`; manuals never enter production builds or tests.

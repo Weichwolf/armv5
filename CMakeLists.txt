@@ -10,7 +10,10 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(armv5 STATIC src/core.cpp src/decode.cpp)
+add_library(armv5 STATIC src/core.cpp src/decode.cpp src/image.cpp src/native.cpp
+  src/lower.cpp src/alu.cpp src/memory.cpp)
+target_include_directories(armv5 SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_link_libraries(armv5 PRIVATE LLVM)
 add_library(armv5::core ALIAS armv5)
 target_compile_features(armv5 PUBLIC cxx_std_23)
 target_include_directories(armv5 PUBLIC
@@ -22,7 +25,9 @@ set_target_properties(armv5 PROPERTIES CXX_EXTENSIONS OFF EXPORT_NAME core)
 # An edit to any preparation input invalidates cached compiler identities,
 # including uncommitted source changes. No Git invocation is needed to build.
 set(ARMV5_PREPARATION_INPUTS CMakeLists.txt include/armv5/core.hpp
-  include/armv5/memory.hpp src/core.cpp src/decode.cpp src/decode.hpp src/identity.hpp.in)
+  include/armv5/memory.hpp src/core.cpp src/decode.cpp src/decode.hpp src/identity.hpp.in src/image.cpp
+  src/image.hpp src/native.cpp src/runtime.hpp src/lower.cpp src/lower.hpp
+  src/alu.cpp src/memory.cpp)
 set(ARMV5_INPUT_HASHES "")
 foreach(input IN LISTS ARMV5_PREPARATION_INPUTS)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${input}")
@@ -41,6 +46,9 @@ if(BUILD_TESTING)
     target_compile_options(armv5_${test}_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME ${test} COMMAND armv5_${test}_test)
   endforeach()
+  target_sources(armv5_core_test PRIVATE test/core/consumer.cpp)
+  target_include_directories(armv5_core_test SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+  target_link_libraries(armv5_core_test PRIVATE LLVM)
 endif()
 
 include(GNUInstallDirs)
@@ -58,3 +66,11 @@ write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/armv5ConfigVersion
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/armv5Config.cmake"
   "${CMAKE_CURRENT_BINARY_DIR}/armv5ConfigVersion.cmake"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/armv5")
+
+if(BUILD_TESTING)
+  add_executable(armv5_bench test/bench/kernels.cpp test/bench/reference.cpp)
+  target_link_libraries(armv5_bench PRIVATE armv5::core)
+  target_include_directories(armv5_bench PRIVATE test)
+  target_compile_options(armv5_bench PRIVATE -O3 -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME bench COMMAND armv5_bench)
+endif()
