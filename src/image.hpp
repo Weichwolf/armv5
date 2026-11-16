@@ -17,6 +17,7 @@ struct Span {
   std::uint32_t address;
   std::vector<std::byte> bytes;
   std::vector<std::uint32_t> modes;
+  bool thumb;
 };
 
 struct Variant {
@@ -29,6 +30,7 @@ struct Variant {
 struct Unit {
   std::size_t variant;
   std::uint32_t mode;
+  bool thumb;
 };
 
 struct Image {

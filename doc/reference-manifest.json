@@ -63,5 +63,18 @@
       "local_origin": "Downloaded directly from the official ARM documentation service",
       "provenance": "Manufacturer-authored reference for analysis only. Chapter 8 supplies zero-wait-state instruction base costs; interlocks and board clocks are outside the nominal accounting model. Not a build input."
     }
+  ],
+  "analysis_inputs": [
+    {
+      "title": "Common numerical kernel definition, contract v6",
+      "source_url": "https://github.com/Weichwolf/dsp56300/blob/ea4be8ddb5775eafefd0d2e1669a597983708a31/test/bench/kernel_reference.hpp",
+      "revision": "ea4be8ddb5775eafefd0d2e1669a597983708a31",
+      "local_file": "build/local/kernel-reference-v6.hpp",
+      "bytes": 5502,
+      "sha256": "e80d9e3eecfefc2bdbd461123e1c5bd344ba0ac268228587469ad6b5bbb16cf9",
+      "license": "GPL-3.0-only",
+      "redistributed": false,
+      "scope": "Read-only numerical definition; independent ARM guest and portable host algorithms bind to the complete Q1.15 output hashes in the contract. No source from this file is compiled or copied into this repository."
+    }
   ]
 }

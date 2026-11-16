@@ -41,7 +41,9 @@ llvm::Value *Lowering::condition(unsigned code, llvm::Value *status) {
 }
 
 llvm::Value *Lowering::reg(const Instruction &instruction, const Values &values, unsigned index) {
-  return index == 15 ? c32(instruction.pc + 8) : values.r[index];
+  if (index != 15) { return values.r[index]; }
+  const auto pc = instruction.pc + (thumb_ ? 4 : 8);
+  return c32(instruction.aligned_pc ? pc & arm_pc_mask : pc);
 }
 
 Shifted Lowering::shift(

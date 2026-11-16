@@ -37,9 +37,15 @@ enum class Operation : std::uint8_t {
   preload,
   swap,
   multiply,
+  long_multiply,
+  dsp_multiply,
+  saturating,
+  count_leading,
   software_interrupt,
   undefined,
-  breakpoint
+  breakpoint,
+  thumb_link_prefix,
+  thumb_link_suffix
 };
 
 struct Instruction {
@@ -47,6 +53,11 @@ struct Instruction {
   Operation operation;
   unsigned cycles;
   bool terminates;
+  unsigned size = 4;
+  bool aligned_pc = false, link = false, exchange = false, continuation_only = false;
+  std::uint32_t target = 0;
+
+  [[nodiscard]] std::uint32_t next() const { return pc + size; }
 };
 
 struct Values {
@@ -62,8 +73,8 @@ struct Join {
 
 struct Block {
   std::size_t first, end;
-  std::uint64_t cycles;
-  Join head;
+  std::uint64_t cycles, ahead_instructions = 0, ahead_cycles = 0;
+  Join head, admitted;
 };
 
 struct Shifted {
@@ -76,7 +87,8 @@ public:
            const Variant &variant,
            llvm::Module &module,
            const std::string &name,
-           std::uint32_t mode);
+           std::uint32_t mode,
+           bool thumb);
   void emit();
 
 private:
@@ -87,6 +99,9 @@ private:
   llvm::IRBuilder<> ir_;
   llvm::Function *function_;
   std::uint32_t mode_;
+  bool thumb_;
+  bool admitted_path_ = false;
+  std::uint32_t emitting_pc_ = 0;
   llvm::Value *runtime_, *instruction_bound_{nullptr}, *cycle_bound_{nullptr}, *direct_{nullptr};
   llvm::Value *pending_signal_ = nullptr, *abort_base_ = nullptr;
   unsigned abort_register_ = 0;
@@ -117,7 +132,12 @@ private:
   void edge(Values values, std::uint32_t target);
   void unknown_target(Values values, llvm::Value *target);
   Values entry_values();
+  Instruction thumb_instruction(std::uint32_t pc, std::uint16_t word);
+  void read_code();
+  void validate_thumb_prefix(const Instruction &instruction) const;
+  void validate_thumb_links();
   void analyze();
+  void admission_paths();
   void emit_block(Block &body);
   void emit_tail(std::size_t index);
   bool emit_event(const Instruction &instruction, Values &values, llvm::Value *old_status);
@@ -131,6 +151,11 @@ private:
   Shifted operand(const Instruction &instruction, const Values &values);
   void alu(const Instruction &instruction, Values &values);
   void multiply(const Instruction &instruction, Values &values);
+  void long_multiply(const Instruction &instruction, Values &values);
+  void dsp_multiply(const Instruction &instruction, Values &values);
+  void saturating(const Instruction &instruction, Values &values);
+  llvm::Value *saturate(llvm::Value *wide, Values &values);
+  void sticky_overflow(llvm::Value *wide, Values &values);
   [[nodiscard]] bool exception_return(const Instruction &instruction) const;
   llvm::Value *user_reg(const Values &values, unsigned index) const;
   void set_user_reg(Values &values, unsigned index, llvm::Value *value) const;
@@ -154,4 +179,6 @@ private:
   [[nodiscard]] bool multiple_user_bank(const Instruction &instruction) const;
   void multiple(const Instruction &instruction, Values &values);
 };
+
+[[nodiscard]] Instruction classify_arm(const Image &image, std::uint32_t pc, std::uint32_t word);
 } // namespace armv5::detail

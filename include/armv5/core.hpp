@@ -68,10 +68,12 @@ struct RunResult {
 };
 
 struct CodeSpan {
+  enum class InstructionSet : std::uint8_t { inherit, arm, thumb };
   std::uint32_t address = 0;
   std::span<const std::byte> bytes;
   // Empty inherits CompileOptions::processor_mode; shared code lists every mode.
   std::span<const std::uint32_t> processor_modes;
+  InstructionSet instruction_set = InstructionSet::inherit;
 };
 
 struct CodeVariant {

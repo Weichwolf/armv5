@@ -4,7 +4,8 @@ This is the implementation target, not a completeness claim. A1 provides the
 public Core API, preparation decoder and strict build targets. A2 now has direct
 SSA LLVM execution and cacheable preparation. A3 adds specialized mode units,
 banked registers, precise exception entry/return and checked K6 event load;
-profile completion remains open. See
+A4 adds classic Thumb/interworking, integer/DSP multiplication and all six
+checked kernels. Profile completion remains open. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text
@@ -56,9 +57,10 @@ These rules come from whole-instrument measurements of the Blofeld emulator
    slow general path. In dsp56300 the fast path covered two thirds of the
    executed instructions and the remaining third carried most of the cost,
    including the hottest loops.
-3. **Account time and budget per basic block.** One admission check per block
-   against the run bound; the exact per-instruction path exists only to finish
-   a bound. Counters are updated once per block.
+3. **Account time and budget per basic block.** Admit the worst acyclic path
+   at unit entry and backwards transfers; forward heads reuse that proof.
+   Indirect transfers conservatively include every forward head. The exact
+   per-instruction path finishes a nearby bound. Counters combine per block.
 4. **Compute status bits where they can be observed.** A later instruction or an
    exit observes them; sticky bits accumulate in one value. In the dsp56300
    per-instruction path 33 of 39 host instructions of an ADD were status work.

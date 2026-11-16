@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "armv5/core.hpp"
+#include "support/arithmetic.hpp"
 #include "support/isa.hpp"
 #include "support/modes.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <iostream>
-#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -19,58 +20,7 @@ namespace {
 constexpr std::uint32_t n_flag = 0x80000000, z_flag = 0x40000000, c_flag = 0x20000000,
                         v_flag = 0x10000000, q_flag = 0x08000000, reset_status = 0xd3;
 
-struct Arithmetic {
-  std::uint32_t result, flags;
-};
-
-Arithmetic pack_expected(std::uint32_t value, bool carry, bool overflow) {
-  return {.result = value,
-          .flags = (value & n_flag) | (value == 0 ? z_flag : 0) | (carry ? c_flag : 0) |
-                   (overflow ? v_flag : 0) | q_flag | reset_status};
-}
-
-Arithmetic
-expected_arithmetic(unsigned opcode, std::pair<std::uint32_t, std::uint32_t> operands, bool carry) {
-  const auto [a, b] = operands;
-  const auto signed_a = std::int64_t(std::bit_cast<std::int32_t>(a));
-  const auto signed_b = std::int64_t(std::bit_cast<std::int32_t>(b));
-  std::int64_t result = 0;
-  bool carry_out = false;
-  if (opcode == 4 || opcode == 5 || opcode == 11) {
-    const unsigned extra = opcode == 5 ? unsigned(carry) : 0;
-    result = signed_a + signed_b + extra;
-    carry_out = std::uint64_t(a) + b + extra > std::numeric_limits<std::uint32_t>::max();
-  } else {
-    const bool reversed = opcode == 3 || opcode == 7;
-    const unsigned borrow = (opcode == 6 || opcode == 7) && !carry ? 1 : 0;
-    result = reversed ? signed_b - signed_a - borrow : signed_a - signed_b - borrow;
-    carry_out = reversed ? std::uint64_t(b) >= std::uint64_t(a) + borrow
-                         : std::uint64_t(a) >= std::uint64_t(b) + borrow;
-  }
-  return pack_expected(static_cast<std::uint32_t>(result),
-                       carry_out,
-                       result < std::numeric_limits<std::int32_t>::min() ||
-                           result > std::numeric_limits<std::int32_t>::max());
-}
-
-Arithmetic expected(unsigned opcode, std::pair<std::uint32_t, std::uint32_t> operands, bool carry) {
-  const auto [a, b] = operands;
-  if ((opcode >= 2 && opcode <= 7) || opcode == 10 || opcode == 11) {
-    return expected_arithmetic(opcode, operands, carry);
-  }
-  std::uint32_t value = 0;
-  switch (opcode) {
-    case 0:
-    case 8: value = a & b; break;
-    case 1:
-    case 9: value = a ^ b; break;
-    case 12: value = a | b; break;
-    case 13: value = b; break;
-    case 14: value = a & ~b; break;
-    default: value = ~b; break;
-  }
-  return pack_expected(value, carry, true);
-}
+using fixture::expected;
 
 void arithmetic() {
   constexpr std::array<std::uint32_t, 7> values{
@@ -392,6 +342,82 @@ void swaps() {
   }
 }
 
+struct MemoryCase {
+  unsigned size;
+  bool fixed, reading, byte;
+};
+
+void expected_memory_access(MemoryCase test,
+                            std::uint32_t address,
+                            armv5::Registers &registers,
+                            std::span<std::byte> ram) {
+  constexpr std::uint32_t base = 0x4000;
+  const auto aligned = test.byte ? address : address & ~std::uint32_t{3};
+  const unsigned width = test.byte ? 1 : 4;
+  std::uint32_t loaded = 0;
+  for (unsigned index = 0; index < width; ++index) {
+    const auto offset = aligned - base + index;
+    if (test.reading) {
+      loaded |= std::to_integer<std::uint32_t>(ram[offset]) << (index * 8);
+    } else {
+      ram[offset] = std::byte(registers.r[0] >> (index * 8));
+    }
+  }
+  if (test.reading) {
+    registers.r[0] = test.byte ? loaded : std::rotr(loaded, int(address & 3) * 8);
+  }
+  registers.r[15] += 4;
+}
+
+void memory_boundary_case(MemoryCase test) {
+  constexpr std::array addresses{
+      0x3ffcU, 0x3fffU, 0x4000U, 0x4001U, 0x4004U, 0x4007U, 0x4008U, 0xfffffffcU, 0xffffffffU};
+  constexpr std::uint32_t base = 0x4000;
+  constexpr std::uint32_t initial_value = 0x87654321;
+  constexpr unsigned byte_start = 49;
+  constexpr unsigned byte_step = 17;
+  fixture::Program program;
+  program.word(fixture::transfer(test.reading, test.byte, 0, 1, 0));
+  fixture::Machine machine(program, test.size);
+  for (unsigned index = 0; index < test.size; ++index) {
+    machine.ram[index] = std::byte(byte_start + (index * byte_step));
+  }
+  const auto initial_ram = machine.ram;
+  machine.prepare({}, test.fixed);
+  for (const auto address : addresses) {
+    std::ranges::copy(initial_ram, machine.ram.begin());
+    machine.core->reset(program.address());
+    auto expected = machine.core->registers();
+    expected.r[0] = initial_value;
+    expected.r[1] = address;
+    machine.registers(expected);
+    auto expected_ram = initial_ram;
+    const auto aligned = test.byte ? address : address & ~std::uint32_t{3};
+    const unsigned width = test.byte ? 1 : 4;
+    const bool valid = aligned >= base && std::uint64_t(aligned) + width <= base + test.size;
+    if (valid) { expected_memory_access(test, address, expected, expected_ram); }
+    const auto result = machine.core->run(1);
+    fixture::require(machine.core->registers() == expected && machine.ram == expected_ram &&
+                         result.progress == armv5::Progress{.instructions = unsigned(valid),
+                                                            .base_cycles = unsigned(valid)} &&
+                         result.execution ==
+                             (valid ? armv5::ExecutionState::ready : armv5::ExecutionState::fault),
+                     "memory range boundary, unsigned wrap, narrow region or fault prefix");
+  }
+}
+
+void memory_boundaries() {
+  for (const auto size : {1U, 8U}) {
+    for (const bool fixed : {false, true}) {
+      for (const bool reading : {false, true}) {
+        for (const bool byte : {false, true}) {
+          memory_boundary_case({.size = size, .fixed = fixed, .reading = reading, .byte = byte});
+        }
+      }
+    }
+  }
+}
+
 void preparation_refusals() {
   struct Case {
     std::uint32_t word;
@@ -405,7 +431,7 @@ void preparation_refusals() {
       Case{.word = 0xf1080080, .reason = "undefined unconditional"},
       Case{.word = 0xfc410f02, .reason = "undefined coprocessor extension"},
       Case{.word = 0xe10f0100, .reason = "control/DSP encoding"},
-      Case{.word = 0xe0810293, .reason = "UMULL: instruction is not lowered"},
+      Case{.word = 0xe08f0293, .reason = "unpredictable long/DSP multiply"},
       Case{.word = 0xe18200d0, .reason = "doubleword index/destination overlap"},
       Case{.word = 0xe1e000f8, .reason = "writeback overlap/PC"},
       Case{.word = 0xee100f10, .reason = "MRC: instruction is not lowered"}};
@@ -437,7 +463,10 @@ int main() {
     status_and_predicated_memory();
     swaps();
     preparation_refusals();
+    memory_boundaries();
     processor_modes();
+    dsp_instructions();
+    thumb_instructions();
     std::cout << "Installed ARM arithmetic, predication, shifts and transfers passed\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

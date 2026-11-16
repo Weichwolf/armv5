@@ -10,12 +10,18 @@ open; see `isa-coverage.md` for the implemented ARM subset and outstanding modes
 `Core::lower(CodeImage, CompileOptions)` needs no Core or consumer RAM. It copies
 and validates code spans, entries, coherent variants, layouts and transitions,
 then returns unoptimized LLVM bitcode and exported names. Decoding happens only
-here. Each native unit has one ARM execution state, one CPSR processor mode and
-one guest endianness. `CodeSpan::processor_modes` declares the modes in which a
+here. Each native unit has one ARM or Thumb execution state, one CPSR processor mode
+and one guest endianness. `CodeSpan::instruction_set` selects ARM/Thumb or inherits
+`CompileOptions::instruction_set`; spans contain complete aligned 4-byte ARM or
+2-byte Thumb instructions. An image may declare both states. Entries and visible
+PCs are byte addresses without the function-pointer state tag; CPSR T selects
+the execution state. Overlapping declarations must agree byte-for-byte and
+select disjoint mode/state contexts. `CodeSpan::processor_modes` declares the modes in which a
 span executes; an empty list inherits `CompileOptions::processor_mode`. Shared
 code lists all its modes. Installation prebinds every declared unit. Control MSR
 and exception return leave the current unit and switch register banks before
-entering the prepared destination; execution never decodes or compiles a mode. Unsupported
+entering the prepared destination. Interworking exits change T and enter the
+prebound state unit. Execution never decodes or compiles a mode/state. Unsupported
 instructions and invalid forms refuse preparation with identity, byte PC and
 reason. Readable tables outside executable spans are never decoded as code.
 
@@ -63,7 +69,12 @@ and pending code transfer. `State::banks` exposes the architectural banks, with
 the active bank normalized into the returned copy. Setting visible registers
 initializes their selected bank; it preserves inactive banks. Restore clears
 residue of later execution and leaves memory and the installed image alone.
-Interrupted IRQ/FIQ replay is checked; CP15 state remains A5 work.
+Interrupted IRQ/FIQ replay is checked, including between the two Thumb BL/BLX
+halves. The prefix retires separately, writes the architectural LR and can be
+snapshotted or interrupted; return resumes its suffix. Preparation rejects
+unpaired halves and external/static branch entries into a suffix. Ordinary
+indirect/interworking branches into a suffix fail explicitly, including at a run
+bound. CP15 state remains A5 work.
 
 Code changes through guest stores or host aliases revoke dependent bindings.
 Same-value writes do not fabricate a change. Declared transitions identify the
@@ -113,7 +124,7 @@ Abort vectors respectively. ALU S+PC and LDM^ with PC restore SPSR and register
 banks. LDM/STM^ without PC access User banks. User/System SPSR and ^ forms refuse
 preparation. Reset deterministically clears unspecified register/bank values,
 sets CPSR 0xd3 and starts at the supplied aligned vector. MMU-driven prefetch
-aborts, high vectors, CP15 and sleep/resume remain A5 work; Thumb returns are A4.
+aborts, high vectors, CP15 and sleep/resume remain A5 work. Thumb exception returns restore T and resume the declared Thumb unit.
 
 ## Nominal cycles
 
@@ -124,7 +135,10 @@ register-controlled ALU shifts cost two; branches cost three; ALU writes to PC
 cost three; LDR PC costs five; doubleword transfers and SWP cost two; multiple
 transfers cost max(n,2), or n+4 when loading PC. MRS costs two, flags-only MSR and
 PLD cost one. MSR selecting non-flag fields costs three; MUL/MLA cost two,
-or four when setting flags. SWI/UDF/BKPT charge three and retire one exception-
+or four when setting flags. Long multiply/accumulate costs three, or five with
+flags. Halfword/word DSP multiply costs one, except SMLALxy costs two; CLZ and
+Q arithmetic cost one. Thumb operations use the same nominal operation costs;
+a Thumb BL/BLX pair costs one for its prefix and three for its suffix. SWI/UDF/BKPT charge three and retire one exception-
 generating instruction. IRQ/FIQ and Data Abort entry charge three without
 retiring a guest instruction; returns charge their ordinary PC-write cost.
 A failed predicate costs one. These are documented nominal costs,

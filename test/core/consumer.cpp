@@ -26,14 +26,22 @@ template <class Value> Value checked(llvm::Expected<Value> result) {
   if (!result) { throw std::runtime_error(llvm::toString(result.takeError())); }
   return std::move(*result);
 }
-}
 
-void consumer_binding() {
+void cached_binding(bool thumb) {
   fixture::Program program;
-  program.word(fixture::transfer(true, false, 2, 0, 0));
-  program.word(fixture::branch(program.pc(), {.address = program.pc()}));
+  if (thumb) {
+    constexpr std::uint16_t load = 0x6802;
+    constexpr std::uint16_t loop = 0xe7fe;
+    program.half(load);
+    program.half(loop);
+  } else {
+    program.word(fixture::transfer(true, false, 2, 0, 0));
+    program.word(fixture::branch(program.pc(), {.address = program.pc()}));
+  }
   fixture::Machine machine(program);
   const armv5::CompileOptions options{
+      .instruction_set = thumb ? armv5::CompileOptions::InstructionSet::thumb
+                               : armv5::CompileOptions::InstructionSet::arm,
       .callbacks = {{.role = armv5::CallbackBinding::Role::read, .symbol = "consumer_read"}}};
   constexpr std::uint32_t interrupt_mode = 0x12;
   constexpr std::array processor_modes{armv5::CompileOptions::supervisor_mode, interrupt_mode};
@@ -73,16 +81,25 @@ void consumer_binding() {
   engine.reset();
   auto registers = machine.core->registers();
   constexpr std::uint32_t unmapped = 0xf0000000;
+  constexpr std::uint32_t thumb_bit = 0x20;
+  registers.cpsr |= thumb ? thumb_bit : 0;
   registers.r[0] = unmapped;
   machine.registers(registers);
   (void)machine.run(1);
   fixture::require(cached.exports().size() == processor_modes.size(),
                    "cached per-mode native units");
-  registers.cpsr = interrupt_mode;
+  registers.cpsr = interrupt_mode | (thumb ? thumb_bit : 0);
   registers.r[2] = 0;
   machine.registers(registers);
   (void)machine.run(1);
   fixture::require(machine.core->registers().r[2] == output &&
-                       machine.core->registers().cpsr == interrupt_mode,
+                       machine.core->registers().cpsr == registers.cpsr,
                    "consumer-linked IR callback or bound native lifetime");
+}
+
+} // namespace
+
+void consumer_binding() {
+  cached_binding(false);
+  cached_binding(true);
 }

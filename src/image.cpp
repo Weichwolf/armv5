@@ -12,6 +12,7 @@
 #include <ios>
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/Support/SHA256.h>
+#include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -98,6 +99,7 @@ Bytes input_bytes(const CodeImage &input, const CompileOptions &options) {
     for (const auto &span : variant.spans) {
       out.number(span.address);
       out.blob(span.bytes);
+      out.number(static_cast<unsigned>(span.instruction_set));
       out.number(span.processor_modes.size());
       for (const auto mode : span.processor_modes) { out.number(mode); }
     }
@@ -127,30 +129,50 @@ Bytes input_bytes(const CodeImage &input, const CompileOptions &options) {
   return std::move(out.bytes);
 }
 
+void validate_overlap(std::string_view identity, const Span &first, const Span &second) {
+  const auto begin = std::max(first.address, second.address);
+  const auto end =
+      std::min(first.address + first.bytes.size(), second.address + second.bytes.size());
+  if (end <= begin) { return; }
+  if (first.thumb == second.thumb && std::ranges::any_of(first.modes, [&](std::uint32_t mode) {
+        return std::ranges::find(second.modes, mode) != second.modes.end();
+      })) {
+    refuse(identity, begin, "overlapping executable spans in the same mode/state");
+  }
+  const auto size = end - begin;
+  if (!std::ranges::equal(std::span(first.bytes).subspan(begin - first.address, size),
+                          std::span(second.bytes).subspan(begin - second.address, size))) {
+    refuse(identity, begin, "overlapping executable declarations contain different bytes");
+  }
+}
+
 void validate_variant(std::string_view identity, const Variant &variant) {
   if (variant.spans.empty() || variant.entries.empty()) {
     refuse(identity, 0, "variant needs code and entries");
   }
-  std::uint64_t end = 0;
-  for (const auto &span : variant.spans) {
-    if (span.bytes.empty() || (span.address & 3) != 0 || (span.bytes.size() & 3) != 0) {
-      refuse(identity, span.address, "ARM executable span must contain aligned complete words");
+  for (std::size_t index = 0; index < variant.spans.size(); ++index) {
+    const auto &span = variant.spans[index];
+    const auto alignment = span.thumb ? 1U : 3U;
+    if (span.bytes.empty() || (span.address & alignment) != 0 ||
+        (span.bytes.size() & alignment) != 0) {
+      refuse(identity, span.address, "executable span must contain aligned complete instructions");
     }
     if (span.bytes.size() > (std::uint64_t{1} << 32) - span.address) {
       refuse(identity, span.address, "executable span crosses the address-space boundary");
     }
-    if (span.address < end) { refuse(identity, span.address, "overlapping executable spans"); }
-    end = span.address + span.bytes.size();
-  }
-  for (const auto entry : variant.entries) {
-    if ((entry & 3) != 0) { refuse(identity, entry, "unaligned ARM entry"); }
-    if (std::ranges::none_of(variant.spans, [entry](const Span &span) {
-          return entry >= span.address && entry - span.address < span.bytes.size();
-        })) {
-      refuse(identity, entry, "entry is outside declared executable spans");
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      validate_overlap(identity, variant.spans[previous], span);
     }
   }
-  end = 0;
+  for (const auto entry : variant.entries) {
+    if (std::ranges::none_of(variant.spans, [entry](const Span &span) {
+          return entry >= span.address && entry - span.address < span.bytes.size() &&
+                 (entry & (span.thumb ? 1U : 3U)) == 0;
+        })) {
+      refuse(identity, entry, "entry is outside declared executable spans or is unaligned");
+    }
+  }
+  std::uint64_t end = 0;
   for (const auto &region : variant.layout) {
     if (region.size == 0 || region.size > (std::uint64_t{1} << 32) - region.address ||
         region.address < end) {
@@ -179,18 +201,26 @@ void validate_callbacks(std::string_view identity, const CompileOptions &options
   }
 }
 
-Span copy_span(std::string_view identity, const CodeSpan &span, std::uint32_t default_mode) {
+Span copy_span(std::string_view identity, const CodeSpan &span, const CompileOptions &options) {
   auto modes = std::vector<std::uint32_t>(span.processor_modes.begin(), span.processor_modes.end());
-  if (modes.empty()) { modes.push_back(default_mode); }
+  if (modes.empty()) { modes.push_back(options.processor_mode); }
   std::ranges::sort(modes);
   for (std::size_t index = 0; index < modes.size(); ++index) {
     if (!valid_mode(modes[index]) || (index != 0 && modes[index] == modes[index - 1])) {
       refuse(identity, span.address, "invalid or duplicate span processor mode");
     }
   }
+  if (static_cast<unsigned>(span.instruction_set) >
+      static_cast<unsigned>(CodeSpan::InstructionSet::thumb)) {
+    refuse(identity, span.address, "invalid span instruction set");
+  }
+  const bool thumb = span.instruction_set == CodeSpan::InstructionSet::thumb ||
+                     (span.instruction_set == CodeSpan::InstructionSet::inherit &&
+                      options.instruction_set == CompileOptions::InstructionSet::thumb);
   return {.address = span.address,
           .bytes = {span.bytes.begin(), span.bytes.end()},
-          .modes = std::move(modes)};
+          .modes = std::move(modes),
+          .thumb = thumb};
 }
 
 void validate_links(const CodeImage &input, const Image &image) {
@@ -241,8 +271,9 @@ bool valid_mode(std::uint32_t mode) {
 Image describe(const CodeImage &input, const CompileOptions &options) {
   if (input.identity.empty()) { refuse(input.identity, 0, "code identity is empty"); }
   if (input.variants.empty()) { refuse(input.identity, 0, "no declared code variants"); }
-  if (options.instruction_set != CompileOptions::InstructionSet::arm) {
-    refuse(input.identity, 0, "Thumb is not lowered yet (A4)");
+  if (static_cast<unsigned>(options.instruction_set) >
+      static_cast<unsigned>(CompileOptions::InstructionSet::thumb)) {
+    refuse(input.identity, 0, "invalid prepared instruction set");
   }
   if (!valid_mode(options.processor_mode)) {
     refuse(input.identity, 0, "invalid prepared processor mode");
@@ -268,7 +299,7 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
                  .entries = {variant.entries.begin(), variant.entries.end()},
                  .layout = {}};
     for (const auto &span : variant.spans) {
-      copy.spans.push_back(copy_span(input.identity, span, options.processor_mode));
+      copy.spans.push_back(copy_span(input.identity, span, options));
     }
     std::ranges::sort(copy.spans, {}, &Span::address);
     bool found_layout = false;
@@ -280,14 +311,13 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
     }
     std::ranges::sort(copy.layout, {}, &RegionLayout::address);
     validate_variant(input.identity, copy);
-    std::vector<std::uint32_t> modes;
+    std::set<std::pair<std::uint32_t, bool>> modes;
     for (const auto &span : copy.spans) {
-      modes.insert(modes.end(), span.modes.begin(), span.modes.end());
+      for (const auto mode : span.modes) { modes.emplace(mode, span.thumb); }
     }
-    std::ranges::sort(modes);
-    const auto duplicates = std::ranges::unique(modes);
-    modes.erase(duplicates.begin(), duplicates.end());
-    for (const auto mode : modes) { result.units.push_back({result.variants.size(), mode}); }
+    for (const auto &[mode, thumb] : modes) {
+      result.units.push_back({result.variants.size(), mode, thumb});
+    }
     result.variants.push_back(std::move(copy));
   }
   validate_links(input, result);
@@ -301,7 +331,7 @@ void pack(Image &image, const CodeImage &input) {
   payload.number(image.exports.size());
   for (const auto &symbol : image.exports) { payload.text(symbol); }
   Writer out;
-  out.text("armv5-artifact-v3");
+  out.text("armv5-artifact-v4");
   out.text(compiler_identity);
   out.blob(digest(payload.bytes));
   out.blob(payload.bytes);
@@ -313,7 +343,7 @@ Image unpack(const CodeImage &input,
              std::span<const std::byte> artifact) {
   try {
     Reader reader{.bytes = artifact};
-    if (reader.text() != "armv5-artifact-v3" || reader.text() != compiler_identity) {
+    if (reader.text() != "armv5-artifact-v4" || reader.text() != compiler_identity) {
       throw std::runtime_error("artifact compiler identity mismatch");
     }
     const auto checksum = reader.blob();

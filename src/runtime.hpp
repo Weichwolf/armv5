@@ -23,11 +23,12 @@ enum class Signal : std::uint8_t {
   software_interrupt,
   undefined,
   prefetch_abort,
-  data_abort
+  data_abort,
+  exchange
 };
 
 struct DirectRegion {
-  std::byte *data;
+  std::uintptr_t address_bias;
   std::uint32_t safe_write;
 };
 

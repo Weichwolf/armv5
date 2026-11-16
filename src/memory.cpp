@@ -4,6 +4,7 @@
 #include "lower.hpp"
 #include "runtime.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/Alignment.h>
+#include <vector>
 
 namespace armv5::detail {
 llvm::Value *Lowering::slow_access(
@@ -60,14 +62,22 @@ llvm::Value *Lowering::access(
   llvm::IRBuilder<> phi_builder(merged);
   auto *result = phi_builder.CreatePHI(ir_.getInt32Ty(), unsigned(variant_.layout.size() + 1));
   auto *signal = phi_builder.CreatePHI(ir_.getInt32Ty(), unsigned(variant_.layout.size() + 1));
-  for (std::size_t index = 0; index < variant_.layout.size(); ++index) {
+  std::vector<std::size_t> order;
+  order.reserve(variant_.layout.size());
+  for (std::size_t index = 0; index < variant_.layout.size(); ++index) { order.push_back(index); }
+  std::ranges::stable_sort(order, {}, [&](std::size_t index) {
+    const auto &region = variant_.layout[index];
+    return !region.readable || !region.writable || region.executable;
+  });
+  for (const auto index : order) {
     const auto &region = variant_.layout[index];
     auto *mapped = block("memory.direct");
     auto *next = block("memory.next");
     auto *wide_address = ir_.CreateZExt(address, ir_.getInt64Ty());
-    auto *within = ir_.CreateAnd(ir_.CreateICmpUGE(wide_address, c64(region.address)),
-                                 ir_.CreateICmpULE(ir_.CreateAdd(wide_address, c64(width)),
-                                                   c64(region.address + region.size)));
+    // Unsigned underflow rejects addresses below the region in the same compare.
+    auto *offset = ir_.CreateSub(wide_address, c64(region.address));
+    auto *within =
+        region.size < width ? ir_.getFalse() : ir_.CreateICmpULE(offset, c64(region.size - width));
     ir_.CreateCondBr(within, mapped, next);
     ir_.SetInsertPoint(mapped);
     const bool allowed = operation == 0 ? region.readable : region.writable;
@@ -81,9 +91,8 @@ llvm::Value *Lowering::access(
       ir_.CreateCondBr(ir_.CreateICmpNE(safe, c32(0)), write, next);
       ir_.SetInsertPoint(write);
     }
-    auto *base = ir_.CreateLoad(ir_.getPtrTy(), descriptor);
-    auto *pointer =
-        ir_.CreateGEP(ir_.getInt8Ty(), base, ir_.CreateSub(wide_address, c64(region.address)));
+    auto *bias = ir_.CreateLoad(ir_.getInt64Ty(), descriptor);
+    auto *pointer = ir_.CreateIntToPtr(ir_.CreateAdd(bias, wide_address), ir_.getPtrTy());
     auto *type = ir_.getIntNTy(width * 8);
     llvm::Value *loaded = c32(0);
     const bool swap_endian = image_.options.big_endian != (std::endian::native == std::endian::big);

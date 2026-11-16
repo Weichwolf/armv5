@@ -19,6 +19,7 @@
 #include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Casting.h>
@@ -142,10 +143,45 @@ bool classify_multiply(const Image &image, std::string_view name, Instruction &r
     result.cycles = (word & 0x00100000) != 0 ? 4 : 2;
     return true;
   }
-  return false;
+  constexpr std::array long_names{"UMULL", "UMLAL", "SMULL", "SMLAL"};
+  constexpr std::array dsp_names{"SMULxy", "SMLAxy", "SMLALxy", "SMULWy", "SMLAWy"};
+  const bool wide = std::ranges::find(long_names, name) != long_names.end();
+  const bool dsp = std::ranges::find(dsp_names, name) != dsp_names.end();
+  if (!wide && !dsp) { return false; }
+  const auto destination = (word >> 16) & 15;
+  const auto accumulator = (word >> 12) & 15;
+  const bool pair = wide || name == "SMLALxy";
+  if (destination == 15 || ((word >> 8) & 15) == 15 || (word & 15) == 15 || accumulator == 15 ||
+      (pair && destination == accumulator)) {
+    refuse(image.identity, pc, "unpredictable long/DSP multiply register pair/PC");
+  }
+  result.operation = wide ? Operation::long_multiply : Operation::dsp_multiply;
+  result.cycles = pair ? 2 : 1;
+  if (wide) { result.cycles = (word & 0x00100000) != 0 ? 5 : 3; }
+  return true;
 }
 
-Instruction classify(const Image &image, std::uint32_t pc, std::uint32_t word) {
+bool classify_dsp(const Image &image, std::string_view name, Instruction &result) {
+  constexpr std::array names{"QADD", "QSUB", "QDADD", "QDSUB"};
+  const auto word = result.word;
+  if (name == "CLZ") {
+    if (((word >> 12) & 15) == 15 || (word & 15) == 15) {
+      refuse(image.identity, result.pc, "unpredictable CLZ PC");
+    }
+    result.operation = Operation::count_leading;
+    return true;
+  }
+  if (std::ranges::find(names, name) == names.end()) { return false; }
+  if (((word >> 12) & 15) == 15 || ((word >> 16) & 15) == 15 || (word & 15) == 15) {
+    refuse(image.identity, result.pc, "unpredictable saturating arithmetic PC");
+  }
+  result.operation = Operation::saturating;
+  return true;
+}
+
+} // namespace
+
+Instruction classify_arm(const Image &image, std::uint32_t pc, std::uint32_t word) {
   constexpr std::uint32_t undefined_mask = 0x0ff000f0;
   constexpr std::uint32_t undefined_value = 0x07f000f0;
   if ((word >> condition_shift) != 15 && (word & undefined_mask) == undefined_value) {
@@ -159,16 +195,26 @@ Instruction classify(const Image &image, std::uint32_t pc, std::uint32_t word) {
   Instruction result{
       .pc = pc, .word = word, .operation = Operation::alu, .cycles = 1, .terminates = false};
   if (classify_alu(image, name, result) || classify_memory(image, name, result) ||
-      classify_multiple(image, name, result) || classify_multiply(image, name, result)) {
+      classify_multiple(image, name, result) || classify_multiply(image, name, result) ||
+      classify_dsp(image, name, result)) {
     return result;
   }
-  if (name == "B" || name == "BL") {
+  if (name == "B" || name == "BL" || name == "BLX immediate") {
     result.operation = Operation::branch;
+    const auto displaced = (word & instruction_offset_mask) << 2;
+    result.target = pc + 8 + ((displaced ^ 0x02000000) - 0x02000000);
+    result.link = name != "B";
+    result.exchange = name == "BLX immediate";
+    constexpr unsigned branch_h_shift = 24;
+    if (result.exchange) { result.target |= ((word >> branch_h_shift) & 1) * 2 | 1; }
     result.cycles = 3;
     result.terminates = true;
     return result;
   }
   if (name == "BX" || name == "BLX register") {
+    if (name == "BLX register" && (word & 15) == 15) {
+      refuse(image.identity, pc, "unpredictable BLX PC operand");
+    }
     result.operation = Operation::exchange;
     result.cycles = 3;
     result.terminates = true;
@@ -207,18 +253,12 @@ Instruction classify(const Image &image, std::uint32_t pc, std::uint32_t word) {
   refuse(image.identity, pc, reason);
 }
 
-std::uint32_t branch_target(const Instruction &instruction) {
-  const auto displaced = (instruction.word & instruction_offset_mask) << 2;
-  const auto signed_offset = (displaced ^ 0x02000000) - 0x02000000;
-  return instruction.pc + 8 + signed_offset;
-}
-} // namespace
-
 Lowering::Lowering(Image &image,
                    const Variant &variant,
                    llvm::Module &module,
                    const std::string &name,
-                   std::uint32_t mode)
+                   std::uint32_t mode,
+                   bool thumb)
     : image_(image),
       variant_(variant),
       module_(module),
@@ -230,6 +270,7 @@ Lowering::Lowering(Image &image,
                                  name,
                                  module)),
       mode_(mode),
+      thumb_(thumb),
       runtime_(function_->getArg(0)) {
   function_->addFnAttr(llvm::Attribute::NoUnwind);
 }
@@ -389,7 +430,13 @@ void Lowering::edge(Values values, std::uint32_t target) {
   const auto found = indices_.find(target);
   if (found != indices_.end()) {
     const auto head = heads_.find(target);
-    jump(head != heads_.end() ? blocks_[head->second].head : tails_[found->second], values);
+    if (head == heads_.end()) {
+      jump(tails_[found->second], values);
+    } else {
+      auto &destination = blocks_[head->second];
+      jump(admitted_path_ && target > emitting_pc_ ? destination.admitted : destination.head,
+           values);
+    }
     return;
   }
   for (const auto &transition : image_.transitions) {
@@ -402,15 +449,29 @@ void Lowering::edge(Values values, std::uint32_t target) {
 }
 
 void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
+  constexpr std::uint32_t thumb_bit = 0x20;
   if (exchange) {
-    guard(ir_.CreateICmpEQ(ir_.CreateAnd(target, c32(1)), c32(0)),
-          values,
-          Signal::unsupported,
-          target);
+    auto *next_thumb = ir_.CreateICmpNE(ir_.CreateAnd(target, c32(1)), c32(0));
+    auto *ordinary = block("same.instruction.set");
+    auto *changed = block("instruction.set.exit");
+    cold_branch(ir_.CreateICmpEQ(next_thumb, ir_.getInt1(thumb_)), ordinary, changed);
+    ir_.SetInsertPoint(changed);
+    auto next = values;
+    next.r[15] = target;
+    auto *status = ir_.CreateOr(ir_.CreateAnd(values.status, c32(~thumb_bit)),
+                                ir_.CreateSelect(next_thumb, c32(thumb_bit), c32(0)));
+    exit(next, Signal::exchange, status);
+    ir_.SetInsertPoint(ordinary);
   }
-  target = ir_.CreateAnd(target, c32(arm_pc_mask));
+  target = ir_.CreateAnd(target, c32(thumb_ ? ~std::uint32_t{1} : arm_pc_mask));
   if (const auto *constant = llvm::dyn_cast<llvm::ConstantInt>(target)) {
-    edge(values, static_cast<std::uint32_t>(constant->getZExtValue()));
+    const auto address = static_cast<std::uint32_t>(constant->getZExtValue());
+    const auto prepared = indices_.find(address);
+    if (prepared != indices_.end() && code_[prepared->second].continuation_only) {
+      exit(values, Signal::unsupported, target);
+    } else {
+      edge(values, address);
+    }
     return;
   }
   values.r[15] = target;
@@ -420,7 +481,11 @@ void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
     auto *destination = block("indirect.target");
     dispatch->addCase(ir_.getInt32(index.pc), destination);
     ir_.SetInsertPoint(destination);
-    edge(values, index.pc);
+    if (index.continuation_only) {
+      exit(values, Signal::unsupported, target);
+    } else {
+      edge(values, index.pc);
+    }
   }
   for (const auto &transition : image_.transitions) {
     if (transition.source_variant != variant_.id || indices_.contains(transition.address)) {
@@ -435,20 +500,76 @@ void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
   unknown_target(values, target);
 }
 
-void Lowering::analyze() {
-  std::set<std::uint32_t> leaders(variant_.entries.begin(), variant_.entries.end());
+void Lowering::read_code() {
   for (const auto &span : variant_.spans) {
-    if (std::ranges::find(span.modes, mode_) == span.modes.end()) { continue; }
-    leaders.insert(span.address);
-    for (std::size_t offset = 0; offset < span.bytes.size(); offset += 4) {
+    if (span.thumb != thumb_ || std::ranges::find(span.modes, mode_) == span.modes.end()) {
+      continue;
+    }
+    for (std::size_t offset = 0; offset < span.bytes.size(); offset += thumb_ ? 2 : 4) {
       const auto pc = span.address + static_cast<std::uint32_t>(offset);
       indices_.emplace(pc, code_.size());
-      code_.push_back(classify(image_, pc, word_at(span, offset, image_.options.big_endian)));
+      if (thumb_) {
+        const auto first = std::to_integer<std::uint16_t>(span.bytes[offset]);
+        const auto second = std::to_integer<std::uint16_t>(span.bytes[offset + 1]);
+        const auto word = image_.options.big_endian ? (first << 8) | second : first | (second << 8);
+        code_.push_back(thumb_instruction(pc, static_cast<std::uint16_t>(word)));
+      } else {
+        code_.push_back(classify_arm(image_, pc, word_at(span, offset, image_.options.big_endian)));
+      }
+    }
+  }
+}
+
+void Lowering::validate_thumb_prefix(const Instruction &instruction) const {
+  const auto next = indices_.find(instruction.next());
+  if (next == indices_.end() || code_[next->second].operation != Operation::thumb_link_suffix) {
+    refuse(image_.identity, instruction.pc, "unpredictable unpaired Thumb BL prefix");
+  }
+  constexpr std::uint32_t offset_mask = 0x7ff;
+  constexpr std::uint32_t offset_sign = 0x400000;
+  const auto high = (instruction.word & offset_mask) << 12;
+  const auto displacement = std::int64_t(high) - ((high & offset_sign) != 0 ? 0x800000 : 0);
+  const auto target = std::int64_t(instruction.pc) + 4 + displacement +
+                      (std::int64_t(code_[next->second].word & offset_mask) * 2);
+  if (target < 0 || target >= (std::int64_t{1} << 32)) {
+    refuse(image_.identity, instruction.pc, "unpredictable Thumb BL address overflow");
+  }
+}
+
+void Lowering::validate_thumb_links() {
+  for (const auto &instruction : code_) {
+    if (instruction.operation == Operation::thumb_link_prefix) {
+      validate_thumb_prefix(instruction);
+    }
+    if (instruction.continuation_only) {
+      const auto previous = indices_.find(instruction.pc - 2);
+      if (previous == indices_.end() ||
+          code_[previous->second].operation != Operation::thumb_link_prefix ||
+          std::ranges::find(variant_.entries, instruction.pc) != variant_.entries.end()) {
+        refuse(image_.identity, instruction.pc, "unpredictable Thumb BL suffix entry/pair");
+      }
+    }
+    if (instruction.operation == Operation::branch) {
+      const auto target = indices_.find(instruction.target);
+      if (target != indices_.end() && code_[target->second].continuation_only) {
+        refuse(image_.identity, instruction.pc, "unpredictable branch into Thumb BL suffix");
+      }
+    }
+  }
+}
+
+void Lowering::analyze() {
+  read_code();
+  validate_thumb_links();
+  std::set<std::uint32_t> leaders(variant_.entries.begin(), variant_.entries.end());
+  for (std::size_t index = 0; index < code_.size(); ++index) {
+    if (index == 0 || code_[index - 1].next() != code_[index].pc) {
+      leaders.insert(code_[index].pc);
     }
   }
   for (const auto &instruction : code_) {
-    if (instruction.terminates) { leaders.insert(instruction.pc + 4); }
-    if (instruction.operation == Operation::branch) { leaders.insert(branch_target(instruction)); }
+    if (instruction.terminates) { leaders.insert(instruction.next()); }
+    if (instruction.operation == Operation::branch) { leaders.insert(instruction.target); }
   }
   for (std::size_t first = 0; first < code_.size();) {
     std::size_t end = first + 1;
@@ -456,11 +577,46 @@ void Lowering::analyze() {
     std::uint64_t cycles = 0;
     for (auto index = first; index < end; ++index) { cycles += code_[index].cycles; }
     heads_.emplace(code_[first].pc, blocks_.size());
-    blocks_.push_back({.first = first, .end = end, .cycles = cycles, .head = join("block")});
+    blocks_.push_back({.first = first,
+                       .end = end,
+                       .cycles = cycles,
+                       .head = join("block"),
+                       .admitted = join("admitted")});
     first = end;
   }
   for (std::size_t index = 0; index < code_.size(); ++index) {
     tails_.push_back(join("bound.tail"));
+  }
+  admission_paths();
+}
+
+void Lowering::admission_paths() {
+  // A region follows increasing PCs only. Every backwards transfer, native unit
+  // entry and exact tail re-enters admission; hence the remaining graph is a DAG.
+  // An indirect transfer may reach any forward head, so include all of them.
+  std::uint64_t forward_instructions = 0;
+  std::uint64_t forward_cycles = 0;
+  for (auto head = heads_.rbegin(); head != heads_.rend(); ++head) {
+    auto &body = blocks_[head->second];
+    const auto &last = code_[body.end - 1];
+    auto extend = [&](std::uint32_t target) {
+      const auto next = heads_.find(target);
+      if (target <= last.pc || next == heads_.end()) { return; }
+      const auto &successor = blocks_[next->second];
+      body.ahead_instructions = std::max(body.ahead_instructions, successor.ahead_instructions);
+      body.ahead_cycles = std::max(body.ahead_cycles, successor.ahead_cycles);
+    };
+    if (!last.terminates || (last.word >> condition_shift) != 14) { extend(last.next()); }
+    if (last.operation == Operation::branch && !last.exchange) {
+      extend(last.target);
+    } else if (last.terminates) {
+      body.ahead_instructions = std::max(body.ahead_instructions, forward_instructions);
+      body.ahead_cycles = std::max(body.ahead_cycles, forward_cycles);
+    }
+    body.ahead_instructions += body.end - body.first;
+    body.ahead_cycles += body.cycles;
+    forward_instructions = std::max(forward_instructions, body.ahead_instructions);
+    forward_cycles = std::max(forward_cycles, body.ahead_cycles);
   }
 }
 
@@ -474,12 +630,16 @@ void Lowering::branch_instruction(const Instruction &instruction, Values values)
     ir_.SetInsertPoint(skipped);
     auto bypass = values;
     bypass.cycles = ir_.CreateAdd(bypass.cycles, c64(1));
-    edge(bypass, instruction.pc + 4);
+    edge(bypass, instruction.next());
     ir_.SetInsertPoint(taken);
   }
-  if ((instruction.word & 0x01000000) != 0) { values.r[14] = c32(instruction.pc + 4); }
+  if (instruction.link) { values.r[14] = c32(instruction.next() | (thumb_ ? 1U : 0U)); }
   values.cycles = ir_.CreateAdd(values.cycles, c64(3));
-  edge(values, branch_target(instruction));
+  if (instruction.exchange) {
+    transfer(values, c32(instruction.target), true);
+  } else {
+    edge(values, instruction.target);
+  }
 }
 
 bool Lowering::emit_event(const Instruction &instruction, Values &values, llvm::Value *old_status) {
@@ -505,7 +665,7 @@ bool Lowering::emit_event(const Instruction &instruction, Values &values, llvm::
     refused.status = old_status;
     guard(valid, refused, Signal::unsupported, c32(instruction.pc));
     values.status = old_status;
-    if (mode_change) { values.r[15] = c32(instruction.pc + 4); }
+    if (mode_change) { values.r[15] = c32(instruction.next()); }
     exit(values, mode_change ? Signal::status : Signal::exception_return, status);
     return true;
   }
@@ -524,6 +684,7 @@ bool Lowering::emit_event(const Instruction &instruction, Values &values, llvm::
 }
 
 void Lowering::emit_instruction(const Instruction &instruction, Values &values) {
+  emitting_pc_ = instruction.pc;
   values.r[15] = c32(instruction.pc);
   pending_signal_ = c32(0);
   abort_base_ = nullptr;
@@ -544,7 +705,7 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
     ir_.CreateCondBr(condition(predicate, values.status), taken, skip);
     ir_.SetInsertPoint(skip);
     auto skipped = values;
-    skipped.r[15] = c32(instruction.pc + 4);
+    skipped.r[15] = c32(instruction.next());
     skipped.instructions = ir_.CreateAdd(skipped.instructions, c64(1));
     skipped.cycles = ir_.CreateAdd(skipped.cycles, c64(1));
     jump(merged, skipped);
@@ -556,13 +717,42 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
   switch (instruction.operation) {
     case Operation::alu: alu(instruction, values); break;
     case Operation::multiply: multiply(instruction, values); break;
+    case Operation::long_multiply: long_multiply(instruction, values); break;
+    case Operation::dsp_multiply: dsp_multiply(instruction, values); break;
+    case Operation::saturating: saturating(instruction, values); break;
+    case Operation::count_leading:
+      values.r[(instruction.word >> 12) & 15] =
+          ir_.CreateIntrinsic(llvm::Intrinsic::ctlz,
+                              {ir_.getInt32Ty()},
+                              {values.r[instruction.word & 15], ir_.getFalse()});
+      break;
     case Operation::software_interrupt:
     case Operation::undefined:
-    case Operation::breakpoint: values.r[15] = c32(instruction.pc + 4); break;
+    case Operation::breakpoint: values.r[15] = c32(instruction.next()); break;
     case Operation::branch: break; // Emitted above with direct known successors.
+    case Operation::thumb_link_prefix: {
+      constexpr std::uint32_t high_mask = 0x7ff;
+      const auto offset = ((instruction.word & high_mask) << 12);
+      values.r[14] = c32(instruction.pc + 4 + ((offset ^ 0x00400000) - 0x00400000));
+      break;
+    }
+    case Operation::thumb_link_suffix: {
+      constexpr std::uint32_t low_mask = 0x7ff;
+      auto *target = ir_.CreateAdd(values.r[14], c32((instruction.word & low_mask) * 2));
+      values.r[15] = instruction.exchange ? ir_.CreateAnd(target, c32(arm_pc_mask))
+                                          : ir_.CreateOr(target, c32(1));
+      values.r[14] = c32(instruction.next() | 1);
+      break;
+    }
     case Operation::exchange: {
       auto *target = reg(instruction, values, instruction.word & 15);
-      if ((instruction.word & 0x20) != 0) { values.r[14] = c32(instruction.pc + 4); }
+      guard(ir_.CreateICmpNE(ir_.CreateAnd(target, c32(3)), c32(2)),
+            values,
+            Signal::unsupported,
+            c32(instruction.pc));
+      if ((instruction.word & 0x20) != 0) {
+        values.r[14] = c32(instruction.next() | (thumb_ ? 1U : 0U));
+      }
       values.r[15] = target;
       break;
     }
@@ -574,7 +764,7 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
     case Operation::msr: status_transfer(instruction, values); break;
     case Operation::preload: break; // Advisory hint has no required architectural access or effect.
   }
-  if (!instruction.terminates) { values.r[15] = c32(instruction.pc + 4); }
+  if (!instruction.terminates) { values.r[15] = c32(instruction.next()); }
   values.instructions = ir_.CreateAdd(values.instructions, c64(1));
   values.cycles = ir_.CreateAdd(values.cycles, c64(instruction.cycles));
   if (instruction.operation == Operation::single || instruction.operation == Operation::extra ||
@@ -595,25 +785,28 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
 void Lowering::emit_block(Block &body) {
   ir_.SetInsertPoint(body.head.block);
   auto values = body.head.values;
-  const auto count = body.end - body.first;
   auto *fits = ir_.CreateAnd(
-      ir_.CreateICmpULE(c64(count), ir_.CreateSub(instruction_bound_, values.instructions)),
-      ir_.CreateICmpULE(c64(body.cycles), ir_.CreateSub(cycle_bound_, values.cycles)));
+      ir_.CreateICmpULE(c64(body.ahead_instructions),
+                        ir_.CreateSub(instruction_bound_, values.instructions)),
+      ir_.CreateICmpULE(c64(body.ahead_cycles), ir_.CreateSub(cycle_bound_, values.cycles)));
   // Unsigned subtraction is only valid for the admission proof while below both bounds.
   fits = ir_.CreateAnd(fits,
                        ir_.CreateAnd(ir_.CreateICmpULT(values.instructions, instruction_bound_),
                                      ir_.CreateICmpULT(values.cycles, cycle_bound_)));
-  auto *ordinary = block("admitted");
+  incoming(body.admitted, values, ir_.GetInsertBlock());
   incoming(tails_[body.first], values, ir_.GetInsertBlock());
-  cold_branch(fits, ordinary, tails_[body.first].block);
-  ir_.SetInsertPoint(ordinary);
+  cold_branch(fits, body.admitted.block, tails_[body.first].block);
+  ir_.SetInsertPoint(body.admitted.block);
+  values = body.admitted.values;
+  admitted_path_ = true;
   for (auto index = body.first; index < body.end; ++index) {
     emit_instruction(code_[index], values);
   }
-  if (!code_[body.end - 1].terminates) { edge(values, code_[body.end - 1].pc + 4); }
+  if (!code_[body.end - 1].terminates) { edge(values, code_[body.end - 1].next()); }
 }
 
 void Lowering::emit_tail(std::size_t index) {
+  admitted_path_ = false;
   ir_.SetInsertPoint(tails_[index].block);
   auto values = tails_[index].values;
   values.r[15] = c32(code_[index].pc);
@@ -624,7 +817,7 @@ void Lowering::emit_tail(std::size_t index) {
         values.r[15]);
   emit_instruction(code_[index], values);
   if (code_[index].terminates) { return; }
-  const auto next = code_[index].pc + 4;
+  const auto next = code_[index].next();
   const auto found = indices_.find(next);
   if (found != indices_.end() && !heads_.contains(next)) {
     jump(tails_[found->second], values);
@@ -637,6 +830,8 @@ void Lowering::emit() {
   auto *entry = block("entry");
   ir_.SetInsertPoint(entry);
   const auto initial = entry_values();
+  auto *entry_signal = load(ir_.getInt32Ty(), offsetof(Runtime, signal));
+  store(c32(0), offsetof(Runtime, signal));
   instruction_bound_ = load(ir_.getInt64Ty(), offsetof(Runtime, instruction_bound));
   cycle_bound_ = load(ir_.getInt64Ty(), offsetof(Runtime, cycle_bound));
   direct_ = load(ir_.getPtrTy(), offsetof(Runtime, direct));
@@ -651,8 +846,19 @@ void Lowering::emit() {
   for (std::size_t index = 0; index < code_.size(); ++index) {
     const auto head = heads_.find(code_[index].pc);
     auto &destination = head == heads_.end() ? tails_[index] : blocks_[head->second].head;
-    incoming(destination, initial, entry);
-    dispatch->addCase(ir_.getInt32(code_[index].pc), destination.block);
+    if (code_[index].continuation_only) {
+      auto *validation = block("validate.bl.continuation");
+      dispatch->addCase(ir_.getInt32(code_[index].pc), validation);
+      ir_.SetInsertPoint(validation);
+      guard(ir_.CreateICmpNE(entry_signal, c32(static_cast<unsigned>(Signal::exchange))),
+            initial,
+            Signal::unsupported,
+            initial.r[15]);
+      jump(destination, initial);
+    } else {
+      incoming(destination, initial, entry);
+      dispatch->addCase(ir_.getInt32(code_[index].pc), destination.block);
+    }
   }
   ir_.SetInsertPoint(unknown);
   exit(initial, Signal::unprepared, initial.r[15]);
@@ -671,9 +877,9 @@ void lower_llvm(Image &image) {
   module.setTargetTriple(llvm::sys::getDefaultTargetTriple());
   for (const auto &unit : image.units) {
     const auto &variant = image.variants[unit.variant];
-    const auto name =
-        "armv5_" + image.key + "_v" + std::to_string(variant.id) + "_m" + std::to_string(unit.mode);
-    Lowering(image, variant, module, name, unit.mode).emit();
+    const auto name = "armv5_" + image.key + "_v" + std::to_string(variant.id) + "_m" +
+                      std::to_string(unit.mode) + (unit.thumb ? "t" : "a");
+    Lowering(image, variant, module, name, unit.mode, unit.thumb).emit();
     image.exports.push_back(name);
   }
   std::string error;

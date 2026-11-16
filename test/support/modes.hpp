@@ -25,12 +25,13 @@ inline constexpr std::uint32_t user_mode = 0x10, fiq_mode = 0x11, irq_mode = 0x1
 struct ModeProgram {
   Program program;
   std::vector<std::uint32_t> modes;
+  armv5::CodeSpan::InstructionSet instruction_set = armv5::CodeSpan::InstructionSet::inherit;
 };
 
 class Modes {
 public:
   std::vector<ModeProgram> programs;
-  std::vector<std::byte> ram = std::vector<std::byte>(0x10000);
+  std::vector<std::byte> ram;
   std::vector<std::vector<std::byte>> storage;
   std::vector<armv5::Memory::Region> regions;
   std::vector<armv5::CodeSpan> spans;
@@ -41,14 +42,16 @@ public:
 
   explicit Modes(std::vector<ModeProgram> code,
                  std::vector<std::uint32_t> declared_vectors = {},
-                 bool fixed = true)
-      : programs(std::move(code)), vectors(std::move(declared_vectors)) {
+                 bool fixed = true,
+                 std::size_t ram_size = 0x10000)
+      : programs(std::move(code)), ram(ram_size), vectors(std::move(declared_vectors)) {
     storage.reserve(programs.size());
     for (auto &item : programs) {
       storage.push_back(item.program.bytes());
       spans.push_back({.address = item.program.address(),
                        .bytes = item.program.bytes(),
-                       .processor_modes = item.modes});
+                       .processor_modes = item.modes,
+                       .instruction_set = item.instruction_set});
       // Code storage is consumer-owned and writable only through an explicit rebind.
       regions.push_back({.address = item.program.address(),
                          .bytes = storage.back(),
@@ -77,7 +80,9 @@ public:
     native.emplace(armv5::Core::compile(image));
     core = std::make_unique<armv5::Core>(armv5::Memory{.regions = regions, .generation = 0});
     (void)core->install(*native, 0);
-    core->reset(programs.front().program.address());
+    auto initial = core->registers();
+    initial.r[15] = programs.front().program.address();
+    core->set_registers(initial);
   }
 
   [[nodiscard]] const armv5::NativeImage &prepared() const {

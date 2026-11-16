@@ -60,7 +60,8 @@ Snapshot::Snapshot(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
 
 namespace {
 constexpr std::uint64_t access_failure = std::uint64_t{1} << 32;
-constexpr std::uint32_t mode_bits = 0x1f, execution_bits = 0x01000020, byte_mask = 255;
+constexpr std::uint32_t mode_bits = 0x1f, execution_bits = 0x01000020, thumb_bit = 0x20,
+                        jazelle_bit = 0x01000000, byte_mask = 255;
 
 struct HostRange {
   std::uintptr_t address;
@@ -99,7 +100,7 @@ struct Core::Impl {
   std::shared_ptr<const detail::Native> binding;
   std::size_t variant_index = 0;
   std::uint32_t revocation_address = 0;
-  std::array<detail::Entry, 32> mode_entries{};
+  std::array<detail::Entry, 64> mode_entries{};
   std::vector<detail::DirectRegion> direct;
   std::vector<HostRange> code_ranges;
   std::string identity, pending_image;
@@ -162,11 +163,12 @@ struct Core::Impl {
     if (!binding || mode_entries[mode] == nullptr) { return false; }
     const auto &image = *binding->image;
     if (std::ranges::find(image.vectors, vector) == image.vectors.end()) { return false; }
-    return std::ranges::any_of(
-        image.variants[variant_index].spans, [vector, mode](const detail::Span &span) {
-          return vector >= span.address && vector - span.address < span.bytes.size() &&
-                 std::ranges::find(span.modes, mode) != span.modes.end();
-        });
+    return std::ranges::any_of(image.variants[variant_index].spans,
+                               [vector, mode](const detail::Span &span) {
+                                 return !span.thumb && vector >= span.address &&
+                                        vector - span.address < span.bytes.size() &&
+                                        std::ranges::find(span.modes, mode) != span.modes.end();
+                               });
   }
 
   struct Exception {
@@ -195,11 +197,19 @@ struct Core::Impl {
 
   bool internal_event() {
     const auto signal = static_cast<detail::Signal>(runtime.signal);
-    if (signal == detail::Signal::status || signal == detail::Signal::exception_return) {
-      change_status(runtime.address);
+    if (signal == detail::Signal::status || signal == detail::Signal::exception_return ||
+        signal == detail::Signal::exchange) {
+      if (signal == detail::Signal::exchange) {
+        runtime.cpsr = runtime.address;
+      } else {
+        change_status(runtime.address);
+      }
       const auto mask = (runtime.cpsr & 0x20) != 0 ? ~std::uint32_t{1} : ~std::uint32_t{3};
       runtime.r[15] &= mask;
-      runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+      // A state-changing branch validates its destination even at a run bound.
+      // Exception returns may resume the second half of a Thumb BL pair.
+      runtime.signal = static_cast<std::uint32_t>(
+          signal == detail::Signal::exchange ? detail::Signal::exchange : detail::Signal::none);
       return true;
     }
     switch (signal) {
@@ -362,7 +372,7 @@ struct Core::Impl {
         detail::refuse(identity, layout.address, "memory layout differs from prepared declaration");
       }
       direct.push_back(
-          {.data = mapping->bytes.data(),
+          {.address_bias = reinterpret_cast<std::uintptr_t>(mapping->bytes.data()) - layout.address,
            .safe_write = unsigned(mapping->writable && !code_overlap(mapping->bytes))});
     }
     runtime.direct = direct.data();
@@ -449,8 +459,8 @@ struct Core::Impl {
       failure(Fault::Kind::unprepared,
               runtime.r[15],
               "no installed native image for memory generation " + std::to_string(generation));
-    } else if ((runtime.cpsr & execution_bits) != 0 ||
-               mode_entries[runtime.cpsr & mode_bits] == nullptr) {
+    } else if ((runtime.cpsr & jazelle_bit) != 0 ||
+               mode_entries[runtime.cpsr & (mode_bits | thumb_bit)] == nullptr) {
       failure(Fault::Kind::unsupported,
               runtime.r[15],
               "processor mode/state differs from prepared unit");
@@ -471,8 +481,8 @@ struct Core::Impl {
     revoked = false;
     running = true;
     do {
-      const auto entry = mode_entries[runtime.cpsr & mode_bits];
-      if (entry == nullptr || (runtime.cpsr & execution_bits) != 0) {
+      const auto entry = mode_entries[runtime.cpsr & (mode_bits | thumb_bit)];
+      if (entry == nullptr || (runtime.cpsr & jazelle_bit) != 0) {
         runtime.signal = static_cast<std::uint32_t>(detail::Signal::unsupported);
         runtime.address = runtime.r[15];
         break;
@@ -480,8 +490,9 @@ struct Core::Impl {
       entry(&runtime);
       const bool resume = internal_event();
       if (revoked || !resume) { break; }
-    } while (runtime.instructions < runtime.instruction_bound &&
-             runtime.cycles < runtime.cycle_bound);
+    } while (
+        runtime.signal == static_cast<std::uint32_t>(detail::Signal::exchange) ||
+        (runtime.instructions < runtime.instruction_bound && runtime.cycles < runtime.cycle_bound));
     running = false;
     external_entry = false;
     finish();
@@ -558,7 +569,8 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
   const auto &units = image.impl_->image->units;
   for (std::size_t index = 0; index < units.size(); ++index) {
     if (units[index].variant == impl_->variant_index) {
-      impl_->mode_entries[units[index].mode] = image.impl_->entries[index];
+      impl_->mode_entries[units[index].mode | (units[index].thumb ? thumb_bit : 0)] =
+          image.impl_->entries[index];
     }
   }
   return image.report();

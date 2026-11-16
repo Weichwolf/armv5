@@ -14,6 +14,9 @@
 #include <string_view>
 #include <vector>
 
+void dsp_instructions();
+void thumb_instructions();
+
 namespace fixture {
 inline constexpr unsigned condition_shift = 28, immediate_bit = 25, opcode_shift = 21,
                           flags_bit = 20, transfer_bit = 26, preindex_bit = 24, up_bit = 23,
@@ -95,6 +98,13 @@ public:
   explicit Program(std::uint32_t address = 0x1000, bool big_endian = false)
       : address_(address), big_endian_(big_endian) {}
 
+  void half(std::uint16_t instruction) {
+    const auto low = std::byte(instruction & byte_mask);
+    const auto high = std::byte(instruction >> 8);
+    bytes_.push_back(big_endian_ ? high : low);
+    bytes_.push_back(big_endian_ ? low : high);
+  }
+
   void word(std::uint32_t instruction) {
     const auto offset = bytes_.size();
     bytes_.resize(offset + 4);
@@ -156,7 +166,9 @@ public:
     }
     layouts.front() = {.variant = 0, .regions = layout_regions};
     core = std::make_unique<armv5::Core>(armv5::Memory{.regions = regions, .generation = 0}, io);
-    core->reset(program.address());
+    auto initial = core->registers();
+    initial.r[15] = program.address();
+    core->set_registers(initial);
   }
 
   [[nodiscard]] armv5::CodeImage image(bool fixed_layout = true) {
