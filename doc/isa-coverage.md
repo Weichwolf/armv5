@@ -1,8 +1,8 @@
 # ISA and implementation coverage
 
-A2 currently executes the ARM operations below through prepared LLVM images.
-This is **not** complete ARMv5TEJ qualification. Thumb, banked state, architectural
-exceptions, multiplication/DSP and the ARM926 memory system are still open.
+A3 executes the ARM operations and modes below through prepared LLVM images.
+This is **not** complete ARMv5TEJ qualification. Thumb, long/DSP multiplication,
+CP15 and the ARM926 memory system are still open.
 Tests are independently authored programs, run through the public interface with
 installed images. Rejected preparation cannot produce an installed image and is
 checked through `Core::lower`; no private decoder or alternate executor is used.
@@ -15,25 +15,28 @@ checked through `Core::lower`; no private decoder or alternate executor is used.
 | B/BL, BX/BLX register, PC | Known successors linked directly; ARM destinations and returns exercised by K4; interior continuations and unknown fallthrough checked by core tests. Thumb destinations and BLX immediate remain A4 work |
 | LDR/STR/LDRB/STRB | Immediate/scaled register offsets, indexing and writeback implemented; public tests cover pre/post up/down access, byte/word, legacy unaligned word rotation, both endiannesses, fixed and dynamic memory paths; K4/K5 check complete memory output |
 | LDRH/STRH/LDRSB/LDRSH/LDRD/STRD | Immediate/register addressing implemented, signed extension and pairs; fixtures cover signed byte/halfword and doubleword loads/stores in both byte orders. Unpredictable alignment and operand combinations explicitly refuse; exhaustive addressing combinations remain open |
-| LDM/STM | Ordinary-bank IA/IB/DA/DB implemented, ordered transfers and writeback; independent stack push/pop fixtures and K4 returns; user-bank and exception-return forms remain A3 work |
+| LDM/STM | Ordinary-bank IA/IB/DA/DB implemented, ordered transfers and writeback; independent stack push/pop fixtures and K4 returns; user-bank forms independently checked in all five exception modes, plus LDM^ exception return and old-bank writeback |
 | SWP/SWPB | One atomic I/O callback or one owner RAM transaction; byte/word and legacy alignment implemented, both byte orders checked |
-| MRS/MSR | Visible CPSR/SPSR reads and flags-only CPSR writes; flags/immediate roundtrip checked. Control writes, SPSR writes and exception return remain A3 work |
+| MRS/MSR | CPSR/SPSR reads and byte-selected writes, privilege masks and dynamic mode validation; all seven modes switch prepared units. All five SPSRs roundtrip and restore NZCVQ/mode through MOVS PC and LDM^; invalid User/System SPSR forms refuse preparation |
+| MUL/MLA/MULS/MLAS | Direct SSA multiplication and accumulate modulo 2^32; independent edge products, NZ updates and CVQ preservation; K6 FIR. Long and E-extension multiply forms remain A4 |
+| SWI/UDF/BKPT | Precise vector/SPSR/LR/mask entry and return; explicit ARM UDF encoding and BKPT prefetch-abort fallback checked. Other unsupported encodings still refuse preparation |
 | PLD | Advisory hint has no required observable data access; accepted without inventing faults or device reads |
-| Invalid/unsupported encodings | Public preparation diagnostics cover extension collisions, ARMv6 media/exclusive/UMAAL/unconditional control, malformed control fields and explicit unlowered MUL/SWI |
+| Invalid/unsupported encodings | Public preparation diagnostics cover extension collisions, ARMv6 media/exclusive/UMAAL/unconditional control, malformed control fields and explicit unlowered UMULL/CP15 |
 
 | Lifecycle area | Evidence/status |
 |---|---|
 | Preparation/cache/binding | Lowered LLVM bitcode, complete checked artifact and load without lowering; missing native symbols and corrupt/mismatched artifacts rejected; consumer-linked IR callback runs through `bind` |
 | Installed code/layout | Actual byte/permission/layout validation; failed install and memory rebind revoke bindings without changing CPU/time |
 | Bounds and state | Exact instruction budgets inside natural blocks, deadline overshoot only at complete boundaries, owner reentry rejection, callback prefix inspection and yield, fault latch, save/restore |
-| Variants and aliases | Native writes through host storage aliases revoke before changed successors; declared destination installation and saved pending-transfer restoration checked |
-| Performance | K4 and K5 check complete outputs and retire over ten million instructions; per-thread user instructions/cycles, throughput, Clang O3 ratio, preparation and text size are measured in `test/bench` |
+| Variants and aliases | Native writes through host storage aliases revoke before changed successors; declared destination installation and saved pending-transfer restoration checked; a partial code-changing STM followed by Data Abort enters the abort state before revocation, then resumes through the declared variant |
+| Modes, exceptions and banks | All seven CPSR modes, User/System sharing, five exception SP/LR/SPSR banks and FIQ R8..R12; nested IRQ/FIQ, mask eligibility, interrupted snapshots/replay, reset masks, undeclared vectors and base-restored Data Abort checked |
+| Performance | K4, K5 and K6 check complete outputs and retire over ten million instructions; per-thread user instructions/cycles, throughput, Clang O3 ratio, preparation and text size are measured in `test/bench`; K6 also checks 4,167 IRQ deliveries under 256-cycle bounds. K4 hot-code attribution is in `benchmarks.md` |
 
 | Mandatory profile work still open | Milestone |
 |---|---|
-| CPSR modes, all banked registers/SPSRs, exception entry/return, reset details, SWI/aborts, IRQ/FIQ, interrupted snapshots and K6 | A3 |
+| MMU-triggered instruction/data abort status, high vectors and CP15 reset state | A5 |
 | All classic Thumb forms, BL halves, ARM/Thumb interworking | A4 |
-| CLZ, multiply/long multiply, E-extension signed halfword multiply and Q arithmetic; K1–K3 | A4 |
+| CLZ, long multiply, E-extension signed halfword multiply and Q arithmetic; K1–K3 | A4 |
 | Coprocessor absence and CP15 register semantics, MMU/FCSE/TLB, domains/permissions/faults, maintenance and TCM | A5 |
 | BXJ documented fallback/exception behavior and explicit Java capability; Java execution unresolved | Open |
 | Exhaustive encoding/operand/addressing qualification, architectural memory-abort ordering and code/mapping edge cases | Open; prevents profile completion |

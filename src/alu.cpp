@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "image.hpp"
 #include "lower.hpp"
+#include "runtime.hpp"
 
 #include <bit>
 #include <cstdint>
@@ -148,7 +149,7 @@ void Lowering::alu(const Instruction &instruction, Values &values) {
   }
   const bool test = opcode >= 8 && opcode <= 11;
   if (!test) { values.r[(instruction.word >> 12) & 15] = result; }
-  if ((instruction.word & 0x00100000) == 0) { return; }
+  if ((instruction.word & 0x00100000) == 0 || exception_return(instruction)) { return; }
   auto *flags =
       ir_.CreateOr(ir_.CreateAnd(result, c32(status_n)),
                    ir_.CreateSelect(ir_.CreateICmpEQ(result, c32(0)), c32(status_z), c32(0)));
@@ -160,23 +161,83 @@ void Lowering::alu(const Instruction &instruction, Values &values) {
       ir_.CreateAnd(values.status, c32(~(arithmetic ? nzcv_mask : nz_mask | status_c))), flags);
 }
 
+bool Lowering::exception_return(const Instruction &instruction) const {
+  const auto word = instruction.word;
+  const bool returning = (instruction.operation == Operation::alu && instruction.terminates &&
+                          (word & 0x00100000) != 0) ||
+                         (instruction.operation == Operation::multiple && instruction.terminates &&
+                          (word & 0x00400000) != 0);
+  if (returning && (mode_ == user_mode || mode_ == system_mode)) {
+    refuse(image_.identity, instruction.pc, "unpredictable exception return without SPSR");
+  }
+  return returning;
+}
+
+llvm::Value *Lowering::user_reg(const Values &values, unsigned index) const {
+  return index < 8 || (index < 13 && mode_ != fiq_mode) || mode_ == user_mode ||
+                 mode_ == system_mode
+             ? values.r[index]
+             : values.user[index - 8];
+}
+
+void Lowering::set_user_reg(Values &values, unsigned index, llvm::Value *value) const {
+  if (index < 8 || (index < 13 && mode_ != fiq_mode) || mode_ == user_mode ||
+      mode_ == system_mode) {
+    values.r[index] = value;
+  } else {
+    values.user[index - 8] = value;
+  }
+}
+
+void Lowering::multiply(const Instruction &instruction, Values &values) {
+  const auto word = instruction.word;
+  auto *result = ir_.CreateMul(values.r[word & 15], values.r[(word >> 8) & 15]);
+  if ((word & 0x00200000) != 0) { result = ir_.CreateAdd(result, values.r[(word >> 12) & 15]); }
+  values.r[(word >> 16) & 15] = result;
+  if ((word & 0x00100000) != 0) {
+    values.status = ir_.CreateOr(
+        ir_.CreateAnd(values.status, c32(~nz_mask)),
+        ir_.CreateOr(ir_.CreateAnd(result, c32(status_n)),
+                     ir_.CreateSelect(ir_.CreateICmpEQ(result, c32(0)), c32(status_z), c32(0))));
+  }
+}
+
 void Lowering::status_transfer(const Instruction &instruction, Values &values) {
   const auto word = instruction.word;
+  const bool saved = (word & 0x00400000) != 0;
+  if (saved && (mode_ == user_mode || mode_ == system_mode)) {
+    refuse(image_.identity, instruction.pc, "unpredictable SPSR access without SPSR");
+  }
   if (instruction.operation == Operation::mrs) {
     const auto destination = (word >> 12) & 15;
     if (destination == 15) { refuse(image_.identity, instruction.pc, "unpredictable MRS PC"); }
-    if ((word & 0x00400000) != 0 &&
-        (image_.options.processor_mode == 0x10 || image_.options.processor_mode == system_mode)) {
-      refuse(image_.identity, instruction.pc, "unpredictable SPSR access without SPSR");
-    }
-    values.r[destination] = (word & 0x00400000) != 0 ? spsr_ : values.status;
+    values.r[destination] = saved ? values.spsr : values.status;
     return;
   }
   if ((word & 0x02000000) == 0 && (word & 15) == 15) {
     refuse(image_.identity, instruction.pc, "unpredictable MSR PC operand");
   }
-  if ((word & 0x00080000) == 0) { return; }
-  values.status = ir_.CreateOr(ir_.CreateAnd(values.status, c32(~flags_mask)),
-                               ir_.CreateAnd(operand(instruction, values).value, c32(flags_mask)));
+  constexpr std::uint32_t unallocated = 0x06ffff00;
+  constexpr std::uint32_t state = 0x01000020;
+  constexpr std::uint32_t privileged = 0xdf;
+  std::uint32_t bytes = 0;
+  for (unsigned index = 0; index < 4; ++index) {
+    if ((word & (1U << (16 + index))) != 0) { bytes |= immediate_mask << (index * 8); }
+  }
+  auto writable = flags_mask;
+  if (saved) {
+    writable |= privileged | state;
+  } else if (mode_ != user_mode) {
+    writable |= privileged;
+  }
+  const auto mask = bytes & writable;
+  auto *value = operand(instruction, values).value;
+  const auto forbidden = unallocated | (!saved && mode_ != user_mode ? state : 0);
+  guard(ir_.CreateICmpEQ(ir_.CreateAnd(value, c32(forbidden & bytes)), c32(0)),
+        values,
+        Signal::unsupported,
+        c32(instruction.pc));
+  llvm::Value *&status = saved ? values.spsr : values.status;
+  status = ir_.CreateOr(ir_.CreateAnd(status, c32(~mask)), ir_.CreateAnd(value, c32(mask)));
 }
 } // namespace armv5::detail

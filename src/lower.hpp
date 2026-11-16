@@ -18,7 +18,7 @@
 
 namespace armv5::detail {
 inline constexpr unsigned condition_shift = 28, opcode_shift = 21, shift_count_mask = 31;
-inline constexpr std::uint32_t system_mode = 0x1f, high_offset_mask = 0xf0;
+inline constexpr std::uint32_t high_offset_mask = 0xf0;
 inline constexpr std::uint32_t status_n = 0x80000000, status_z = 0x40000000, status_c = 0x20000000,
                                status_v = 0x10000000, nz_mask = 0xc0000000, nzcv_mask = 0xf0000000,
                                flags_mask = 0xf8000000, mode_mask = 0x1f, arm_pc_mask = 0xfffffffc,
@@ -35,7 +35,11 @@ enum class Operation : std::uint8_t {
   mrs,
   msr,
   preload,
-  swap
+  swap,
+  multiply,
+  software_interrupt,
+  undefined,
+  breakpoint
 };
 
 struct Instruction {
@@ -47,7 +51,8 @@ struct Instruction {
 
 struct Values {
   std::array<llvm::Value *, 16> r{};
-  llvm::Value *status = nullptr, *instructions = nullptr, *cycles = nullptr;
+  std::array<llvm::Value *, 7> user{};
+  llvm::Value *status = nullptr, *spsr = nullptr, *instructions = nullptr, *cycles = nullptr;
 };
 
 struct Join {
@@ -67,7 +72,11 @@ struct Shifted {
 
 class Lowering {
 public:
-  Lowering(Image &image, const Variant &variant, llvm::Module &module, const std::string &name);
+  Lowering(Image &image,
+           const Variant &variant,
+           llvm::Module &module,
+           const std::string &name,
+           std::uint32_t mode);
   void emit();
 
 private:
@@ -77,9 +86,10 @@ private:
   llvm::LLVMContext &context_;
   llvm::IRBuilder<> ir_;
   llvm::Function *function_;
-  llvm::Value *runtime_, *spsr_{nullptr}, *instruction_bound_{nullptr}, *cycle_bound_{nullptr},
-      *direct_{nullptr};
-  llvm::Value *pending_signal_ = nullptr;
+  std::uint32_t mode_;
+  llvm::Value *runtime_, *instruction_bound_{nullptr}, *cycle_bound_{nullptr}, *direct_{nullptr};
+  llvm::Value *pending_signal_ = nullptr, *abort_base_ = nullptr;
+  unsigned abort_register_ = 0;
   Join exit_;
   llvm::Value *exit_signal_ = nullptr, *exit_address_ = nullptr;
   std::vector<Instruction> code_;
@@ -110,6 +120,7 @@ private:
   void analyze();
   void emit_block(Block &body);
   void emit_tail(std::size_t index);
+  bool emit_event(const Instruction &instruction, Values &values, llvm::Value *old_status);
   void emit_instruction(const Instruction &instruction, Values &values);
   void branch_instruction(const Instruction &instruction, Values values);
   llvm::Value *condition(unsigned code, llvm::Value *status);
@@ -119,6 +130,10 @@ private:
   shift(llvm::Value *value, unsigned type, llvm::Value *amount, bool immediate, llvm::Value *carry);
   Shifted operand(const Instruction &instruction, const Values &values);
   void alu(const Instruction &instruction, Values &values);
+  void multiply(const Instruction &instruction, Values &values);
+  [[nodiscard]] bool exception_return(const Instruction &instruction) const;
+  llvm::Value *user_reg(const Values &values, unsigned index) const;
+  void set_user_reg(Values &values, unsigned index, llvm::Value *value) const;
   void status_transfer(const Instruction &instruction, Values &values);
   llvm::Value *access(
       Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value);
@@ -136,6 +151,7 @@ private:
   transfer_offset(const Instruction &instruction, const Values &values, const Transfer &plan);
   void swap_memory(const Instruction &instruction, Values &values);
   void memory(const Instruction &instruction, Values &values);
+  [[nodiscard]] bool multiple_user_bank(const Instruction &instruction) const;
   void multiple(const Instruction &instruction, Values &values);
 };
 } // namespace armv5::detail

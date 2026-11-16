@@ -4,6 +4,7 @@
 #include "armv5/core.hpp"
 #include "support/isa.hpp"
 
+#include <array>
 #include <cstdint>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
@@ -34,6 +35,9 @@ void consumer_binding() {
   fixture::Machine machine(program);
   const armv5::CompileOptions options{
       .callbacks = {{.role = armv5::CallbackBinding::Role::read, .symbol = "consumer_read"}}};
+  constexpr std::uint32_t interrupt_mode = 0x12;
+  constexpr std::array processor_modes{armv5::CompileOptions::supervisor_mode, interrupt_mode};
+  machine.spans.front().processor_modes = processor_modes;
   const auto declarations = machine.image();
   const auto lowered = armv5::Core::lower(declarations, options);
   const auto cached = armv5::Core::load(declarations, options, lowered.artifact());
@@ -72,6 +76,13 @@ void consumer_binding() {
   registers.r[0] = unmapped;
   machine.registers(registers);
   (void)machine.run(1);
-  fixture::require(machine.core->registers().r[2] == output,
+  fixture::require(cached.exports().size() == processor_modes.size(),
+                   "cached per-mode native units");
+  registers.cpsr = interrupt_mode;
+  registers.r[2] = 0;
+  machine.registers(registers);
+  (void)machine.run(1);
+  fixture::require(machine.core->registers().r[2] == output &&
+                       machine.core->registers().cpsr == interrupt_mode,
                    "consumer-linked IR callback or bound native lifetime");
 }

@@ -10,8 +10,12 @@ open; see `isa-coverage.md` for the implemented ARM subset and outstanding modes
 `Core::lower(CodeImage, CompileOptions)` needs no Core or consumer RAM. It copies
 and validates code spans, entries, coherent variants, layouts and transitions,
 then returns unoptimized LLVM bitcode and exported names. Decoding happens only
-here. The current unit has one ARM execution state, one CPSR processor mode and
-one guest endianness; mismatched runtime modes explicitly fail. Unsupported
+here. Each native unit has one ARM execution state, one CPSR processor mode and
+one guest endianness. `CodeSpan::processor_modes` declares the modes in which a
+span executes; an empty list inherits `CompileOptions::processor_mode`. Shared
+code lists all its modes. Installation prebinds every declared unit. Control MSR
+and exception return leave the current unit and switch register banks before
+entering the prepared destination; execution never decodes or compiles a mode. Unsupported
 instructions and invalid forms refuse preparation with identity, byte PC and
 reason. Readable tables outside executable spans are never decoded as code.
 
@@ -54,10 +58,12 @@ next admission, after the last completed prefix has been preserved.
 `registers`/`set_registers` inspect and initialize visible registers. Setting the
 PC requires a declared external entry; native interior continuations can resume
 at every prepared instruction boundary. `save`/`restore` preserve current
-registers, progress, fault, external-entry continuation and pending code transfer.
-Restore clears residue of later execution and leaves memory and the installed
-image alone. Banked registers, architectural exceptions and interrupted-boundary
-qualification are still A3 work; CP15 state is A5 work.
+registers, all banked registers/SPSRs, progress, fault, external-entry continuation
+and pending code transfer. `State::banks` exposes the architectural banks, with
+the active bank normalized into the returned copy. Setting visible registers
+initializes their selected bank; it preserves inactive banks. Restore clears
+residue of later execution and leaves memory and the installed image alone.
+Interrupted IRQ/FIQ replay is checked; CP15 state remains A5 work.
 
 Code changes through guest stores or host aliases revoke dependent bindings.
 Same-value writes do not fabricate a change. Declared transitions identify the
@@ -89,8 +95,25 @@ native binding without any private core headers.
 Preparation/install failures throw `std::runtime_error` with guest context.
 Invalid owner initialization throws `std::invalid_argument`; reentry throws
 `std::logic_error`. Execution failures return `Fault` and latch until reset or
-restore. IRQ/FIQ entry, architectural aborts, sleep/resume and exception returns
-remain explicit A3/A5 refusals, rather than invented no-op behavior.
+restore. Missing physical storage and denied region permissions cause a Data
+Abort; a present Io callback returning false remains an explicit host memory
+fault. A Data Abort preserves the original instruction base register (the ARM9E
+base-restored model), leaves the failing instruction unretired and enters Abort
+mode. Earlier completed multiple-transfer accesses remain visible; non-base
+loaded registers are architecturally unspecified on that abort.
+
+`interrupt_ready` tests CPSR I/F masks at a stopped instruction boundary; a masked
+`interrupt` request has no effect. An accepted IRQ/FIQ saves CPSR, banks SP/LR
+(and FIQ R8..R12), sets masks and enters the declared vector without executing a
+handler instruction. FIQ can preempt IRQ. Consumers own request levels, priority
+and delivery timing. Every exception vector must appear in `interrupt_vectors`
+and in a code span prepared for its exception mode. Missing declarations fail
+explicitly. SWI, explicit ARM UDF and BKPT enter Supervisor, Undefined and Prefetch
+Abort vectors respectively. ALU S+PC and LDM^ with PC restore SPSR and register
+banks. LDM/STM^ without PC access User banks. User/System SPSR and ^ forms refuse
+preparation. Reset deterministically clears unspecified register/bank values,
+sets CPSR 0xd3 and starts at the supplied aligned vector. MMU-driven prefetch
+aborts, high vectors, CP15 and sleep/resume remain A5 work; Thumb returns are A4.
 
 ## Nominal cycles
 
@@ -100,5 +123,9 @@ clock factors. ALU/immediate-shift and ordinary single transfers cost one;
 register-controlled ALU shifts cost two; branches cost three; ALU writes to PC
 cost three; LDR PC costs five; doubleword transfers and SWP cost two; multiple
 transfers cost max(n,2), or n+4 when loading PC. MRS costs two, flags-only MSR and
-PLD cost one. A failed predicate costs one. These are documented nominal costs,
+PLD cost one. MSR selecting non-flag fields costs three; MUL/MLA cost two,
+or four when setting flags. SWI/UDF/BKPT charge three and retire one exception-
+generating instruction. IRQ/FIQ and Data Abort entry charge three without
+retiring a guest instruction; returns charge their ordinary PC-write cost.
+A failed predicate costs one. These are documented nominal costs,
 not a cycle-accurate ARM926 pipeline or a consumer clock.

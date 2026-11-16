@@ -98,6 +98,8 @@ Bytes input_bytes(const CodeImage &input, const CompileOptions &options) {
     for (const auto &span : variant.spans) {
       out.number(span.address);
       out.blob(span.bytes);
+      out.number(span.processor_modes.size());
+      for (const auto mode : span.processor_modes) { out.number(mode); }
     }
     out.number(variant.entries.size());
     for (const auto entry : variant.entries) { out.number(entry); }
@@ -177,6 +179,20 @@ void validate_callbacks(std::string_view identity, const CompileOptions &options
   }
 }
 
+Span copy_span(std::string_view identity, const CodeSpan &span, std::uint32_t default_mode) {
+  auto modes = std::vector<std::uint32_t>(span.processor_modes.begin(), span.processor_modes.end());
+  if (modes.empty()) { modes.push_back(default_mode); }
+  std::ranges::sort(modes);
+  for (std::size_t index = 0; index < modes.size(); ++index) {
+    if (!valid_mode(modes[index]) || (index != 0 && modes[index] == modes[index - 1])) {
+      refuse(identity, span.address, "invalid or duplicate span processor mode");
+    }
+  }
+  return {.address = span.address,
+          .bytes = {span.bytes.begin(), span.bytes.end()},
+          .modes = std::move(modes)};
+}
+
 void validate_links(const CodeImage &input, const Image &image) {
   for (const auto &layout : input.layouts) {
     if (std::ranges::find(image.variants, layout.variant, &Variant::id) == image.variants.end()) {
@@ -216,14 +232,19 @@ refuse(std::string_view identity, std::uint32_t address, std::string_view reason
   throw std::runtime_error(message.str());
 }
 
+bool valid_mode(std::uint32_t mode) {
+  constexpr std::array modes{
+      user_mode, fiq_mode, irq_mode, supervisor_mode, abort_mode, undefined_mode, system_mode};
+  return std::ranges::find(modes, mode) != modes.end();
+}
+
 Image describe(const CodeImage &input, const CompileOptions &options) {
   if (input.identity.empty()) { refuse(input.identity, 0, "code identity is empty"); }
   if (input.variants.empty()) { refuse(input.identity, 0, "no declared code variants"); }
   if (options.instruction_set != CompileOptions::InstructionSet::arm) {
     refuse(input.identity, 0, "Thumb is not lowered yet (A4)");
   }
-  constexpr std::array modes{0x10U, 0x11U, 0x12U, 0x13U, 0x17U, 0x1bU, 0x1fU};
-  if (std::ranges::find(modes, options.processor_mode) == modes.end()) {
+  if (!valid_mode(options.processor_mode)) {
     refuse(input.identity, 0, "invalid prepared processor mode");
   }
   validate_callbacks(input.identity, options);
@@ -247,8 +268,7 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
                  .entries = {variant.entries.begin(), variant.entries.end()},
                  .layout = {}};
     for (const auto &span : variant.spans) {
-      copy.spans.push_back(
-          {.address = span.address, .bytes = {span.bytes.begin(), span.bytes.end()}});
+      copy.spans.push_back(copy_span(input.identity, span, options.processor_mode));
     }
     std::ranges::sort(copy.spans, {}, &Span::address);
     bool found_layout = false;
@@ -260,6 +280,14 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
     }
     std::ranges::sort(copy.layout, {}, &RegionLayout::address);
     validate_variant(input.identity, copy);
+    std::vector<std::uint32_t> modes;
+    for (const auto &span : copy.spans) {
+      modes.insert(modes.end(), span.modes.begin(), span.modes.end());
+    }
+    std::ranges::sort(modes);
+    const auto duplicates = std::ranges::unique(modes);
+    modes.erase(duplicates.begin(), duplicates.end());
+    for (const auto mode : modes) { result.units.push_back({result.variants.size(), mode}); }
     result.variants.push_back(std::move(copy));
   }
   validate_links(input, result);
@@ -273,7 +301,7 @@ void pack(Image &image, const CodeImage &input) {
   payload.number(image.exports.size());
   for (const auto &symbol : image.exports) { payload.text(symbol); }
   Writer out;
-  out.text("armv5-artifact-v2");
+  out.text("armv5-artifact-v3");
   out.text(compiler_identity);
   out.blob(digest(payload.bytes));
   out.blob(payload.bytes);
@@ -285,7 +313,7 @@ Image unpack(const CodeImage &input,
              std::span<const std::byte> artifact) {
   try {
     Reader reader{.bytes = artifact};
-    if (reader.text() != "armv5-artifact-v2" || reader.text() != compiler_identity) {
+    if (reader.text() != "armv5-artifact-v3" || reader.text() != compiler_identity) {
       throw std::runtime_error("artifact compiler identity mismatch");
     }
     const auto checksum = reader.blob();
@@ -301,9 +329,7 @@ Image unpack(const CodeImage &input,
     const auto bitcode = data.blob();
     image.bitcode.assign(bitcode.begin(), bitcode.end());
     const auto count = data.number();
-    if (count != image.variants.size()) {
-      throw std::runtime_error("artifact export count mismatch");
-    }
+    if (count != image.units.size()) { throw std::runtime_error("artifact export count mismatch"); }
     for (std::uint64_t index = 0; index < count; ++index) { image.exports.push_back(data.text()); }
     if (!data.bytes.empty() || image.bitcode.empty()) {
       throw std::runtime_error("invalid artifact payload");

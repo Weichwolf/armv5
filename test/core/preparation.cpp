@@ -3,6 +3,7 @@
 #include "armv5/memory.hpp"
 #include "consumer.hpp"
 #include "support/isa.hpp"
+#include "support/modes.hpp"
 
 #include <algorithm>
 #include <array>
@@ -218,8 +219,10 @@ void aliases_and_transitions() {
                                            .readable = true,
                                            .writable = true,
                                            .executable = false}};
-  const std::array old_spans{armv5::CodeSpan{.address = 0x1000, .bytes = old_code}};
-  const std::array new_spans{armv5::CodeSpan{.address = 0x1000, .bytes = new_code}};
+  const std::array old_spans{
+      armv5::CodeSpan{.address = 0x1000, .bytes = old_code, .processor_modes = {}}};
+  const std::array new_spans{
+      armv5::CodeSpan{.address = 0x1000, .bytes = new_code, .processor_modes = {}}};
   const std::array<std::uint32_t, 1> old_entries{0x1000};
   const std::array<std::uint32_t, 1> new_entries{0x1004};
   const std::array variants{
@@ -281,6 +284,7 @@ int main() {
     callbacks_and_faults();
     aliases_and_transitions();
     consumer_binding();
+    interrupts();
     std::cout << "Installed image lifecycle, cache, callbacks and alias transitions passed\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

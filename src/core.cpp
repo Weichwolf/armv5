@@ -7,6 +7,7 @@
 #include "runtime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstddef>
@@ -97,6 +98,8 @@ struct Core::Impl {
   bool running = false, external_entry = true, revoked = false;
   std::shared_ptr<const detail::Native> binding;
   std::size_t variant_index = 0;
+  std::uint32_t revocation_address = 0;
+  std::array<detail::Entry, 32> mode_entries{};
   std::vector<detail::DirectRegion> direct;
   std::vector<HostRange> code_ranges;
   std::string identity, pending_image;
@@ -109,6 +112,111 @@ struct Core::Impl {
 
   void stopped() const {
     if (running) { throw std::logic_error("Core mutation/execution reentry from callback"); }
+  }
+
+  static std::size_t saved_index(std::uint32_t mode) {
+    switch (mode) {
+      case detail::fiq_mode: return 0;
+      case detail::irq_mode: return 1;
+      case detail::supervisor_mode: return 2;
+      case detail::abort_mode: return 3;
+      case detail::undefined_mode: return 4;
+      default: return 5;
+    }
+  }
+
+  static std::span<std::uint32_t> pair(State::Banks &banks, std::uint32_t mode) {
+    switch (mode) {
+      case detail::fiq_mode: return std::span(banks.fiq).subspan(5);
+      case detail::irq_mode: return banks.irq;
+      case detail::supervisor_mode: return banks.supervisor;
+      case detail::abort_mode: return banks.abort;
+      case detail::undefined_mode: return banks.undefined;
+      default: return std::span(banks.user).subspan(5);
+    }
+  }
+
+  void save_bank(State::Banks &banks) const {
+    const auto mode = runtime.cpsr & mode_bits;
+    auto &high = mode == detail::fiq_mode ? banks.fiq : banks.user;
+    std::copy_n(runtime.r.begin() + 8, 5, high.begin());
+    auto bank = pair(banks, mode);
+    std::copy_n(runtime.r.begin() + 13, 2, bank.begin());
+    const auto saved = saved_index(mode);
+    if (saved < banks.spsr.size()) { banks.spsr[saved] = runtime.spsr; }
+  }
+
+  void change_status(std::uint32_t status) {
+    save_bank(runtime.banks);
+    const auto mode = status & mode_bits;
+    const auto &high = mode == detail::fiq_mode ? runtime.banks.fiq : runtime.banks.user;
+    std::copy_n(high.begin(), 5, runtime.r.begin() + 8);
+    const auto bank = pair(runtime.banks, mode);
+    std::copy_n(bank.begin(), 2, runtime.r.begin() + 13);
+    const auto saved = saved_index(mode);
+    runtime.spsr = saved < runtime.banks.spsr.size() ? runtime.banks.spsr[saved] : 0;
+    runtime.cpsr = status;
+  }
+
+  [[nodiscard]] bool declared_vector(std::uint32_t vector, std::uint32_t mode) const {
+    if (!binding || mode_entries[mode] == nullptr) { return false; }
+    const auto &image = *binding->image;
+    if (std::ranges::find(image.vectors, vector) == image.vectors.end()) { return false; }
+    return std::ranges::any_of(
+        image.variants[variant_index].spans, [vector, mode](const detail::Span &span) {
+          return vector >= span.address && vector - span.address < span.bytes.size() &&
+                 std::ranges::find(span.modes, mode) != span.modes.end();
+        });
+  }
+
+  struct Exception {
+    std::uint32_t vector, mode;
+  };
+
+  bool exception(Exception target, std::uint32_t link, bool fast, bool charge) {
+    const auto [vector, mode] = target;
+    if (!declared_vector(vector, mode)) {
+      failure(Fault::Kind::unprepared, vector, "exception vector/mode was not declared");
+      return false;
+    }
+    const auto status = runtime.cpsr;
+    constexpr std::uint32_t irq_mask = 0x80;
+    constexpr std::uint32_t fiq_mask = 0x40;
+    change_status((status & ~(mode_bits | execution_bits)) | mode | irq_mask |
+                  (fast ? fiq_mask : 0));
+    runtime.spsr = status;
+    runtime.r[14] = link;
+    runtime.r[15] = vector;
+    if (charge) { runtime.cycles += 3; }
+    runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+    external_entry = false;
+    return true;
+  }
+
+  bool internal_event() {
+    const auto signal = static_cast<detail::Signal>(runtime.signal);
+    if (signal == detail::Signal::status || signal == detail::Signal::exception_return) {
+      change_status(runtime.address);
+      const auto mask = (runtime.cpsr & 0x20) != 0 ? ~std::uint32_t{1} : ~std::uint32_t{3};
+      runtime.r[15] &= mask;
+      runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+      return true;
+    }
+    switch (signal) {
+      case detail::Signal::software_interrupt:
+        return exception(
+            {.vector = 8, .mode = detail::supervisor_mode}, runtime.r[15], false, false);
+      case detail::Signal::undefined:
+        return exception(
+            {.vector = 4, .mode = detail::undefined_mode}, runtime.r[15], false, false);
+      case detail::Signal::prefetch_abort:
+        return exception(
+            {.vector = 12, .mode = detail::abort_mode}, runtime.address + 4, false, false);
+      case detail::Signal::data_abort:
+        return exception(
+            {.vector = 16, .mode = detail::abort_mode}, runtime.r[15] + 8, false, true);
+      default: return false;
+    }
   }
 
   void rebind(Memory memory) {
@@ -161,21 +269,26 @@ struct Core::Impl {
     auto value = request.value;
     const auto replacement = request.replacement;
     bool accepted = false;
+    bool present = false;
     if (operation == 0) {
       const auto callback =
           replacement == 0 ? io.read : std::bit_cast<decltype(io.read)>(replacement);
-      accepted = callback != nullptr && callback(io.owner, address, width, value);
+      present = callback != nullptr;
+      accepted = present && callback(io.owner, address, width, value);
     } else if (operation == 1) {
       const auto callback =
           replacement == 0 ? io.write : std::bit_cast<decltype(io.write)>(replacement);
-      accepted = callback != nullptr && callback(io.owner, address, width, value);
+      present = callback != nullptr;
+      accepted = present && callback(io.owner, address, width, value);
     } else {
       const auto callback =
           replacement == 0 ? io.swap : std::bit_cast<decltype(io.swap)>(replacement);
-      accepted = callback != nullptr && callback(io.owner, address, width, value);
+      present = callback != nullptr;
+      accepted = present && callback(io.owner, address, width, value);
     }
     if (accepted) { return value; }
-    runtime.signal = static_cast<std::uint32_t>(detail::Signal::memory);
+    runtime.signal =
+        static_cast<std::uint32_t>(present ? detail::Signal::memory : detail::Signal::data_abort);
     runtime.address = address;
     return access_failure;
   }
@@ -196,7 +309,7 @@ struct Core::Impl {
                              .replacement = replacement});
     }
     if ((operation != 1 && !region->readable) || (operation != 0 && !region->writable)) {
-      runtime->signal = static_cast<std::uint32_t>(detail::Signal::memory);
+      runtime->signal = static_cast<std::uint32_t>(detail::Signal::data_abort);
       runtime->address = address;
       return access_failure;
     }
@@ -209,6 +322,7 @@ struct Core::Impl {
       const auto mask =
           width == 4 ? std::numeric_limits<std::uint32_t>::max() : (1U << (width * 8)) - 1;
       if (aliases_code && old != (value & mask)) {
+        if (!owner.revoked) { owner.revocation_address = address; }
         owner.revoked = true;
         runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed);
         runtime->address = address;
@@ -257,6 +371,8 @@ struct Core::Impl {
   [[nodiscard]] State inspect() const {
     auto result = continuation;
     result.registers = {.r = runtime.r, .cpsr = runtime.cpsr, .spsr = runtime.spsr};
+    result.banks = runtime.banks;
+    save_bank(result.banks);
     result.progress = {.instructions = runtime.instructions, .base_cycles = runtime.cycles};
     return result;
   }
@@ -268,8 +384,10 @@ struct Core::Impl {
   }
 
   void finish() {
+    if (continuation.execution == ExecutionState::fault) { return; }
     if (revoked && runtime.signal != static_cast<std::uint32_t>(detail::Signal::memory)) {
       runtime.signal = static_cast<std::uint32_t>(detail::Signal::changed);
+      runtime.address = revocation_address;
     }
     if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::none)) { return; }
     if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::yielded)) {
@@ -332,7 +450,7 @@ struct Core::Impl {
               runtime.r[15],
               "no installed native image for memory generation " + std::to_string(generation));
     } else if ((runtime.cpsr & execution_bits) != 0 ||
-               (runtime.cpsr & mode_bits) != binding->image->options.processor_mode) {
+               mode_entries[runtime.cpsr & mode_bits] == nullptr) {
       failure(Fault::Kind::unsupported,
               runtime.r[15],
               "processor mode/state differs from prepared unit");
@@ -352,7 +470,18 @@ struct Core::Impl {
     runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
     revoked = false;
     running = true;
-    binding->entries[variant_index](&runtime);
+    do {
+      const auto entry = mode_entries[runtime.cpsr & mode_bits];
+      if (entry == nullptr || (runtime.cpsr & execution_bits) != 0) {
+        runtime.signal = static_cast<std::uint32_t>(detail::Signal::unsupported);
+        runtime.address = runtime.r[15];
+        break;
+      }
+      entry(&runtime);
+      const bool resume = internal_event();
+      if (revoked || !resume) { break; }
+    } while (runtime.instructions < runtime.instruction_bound &&
+             runtime.cycles < runtime.cycle_bound);
     running = false;
     external_entry = false;
     finish();
@@ -425,6 +554,13 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
   impl_->validate_layout(*found);
   impl_->binding = image.impl_;
   impl_->variant_index = static_cast<std::size_t>(found - variants.begin());
+  impl_->mode_entries.fill(nullptr);
+  const auto &units = image.impl_->image->units;
+  for (std::size_t index = 0; index < units.size(); ++index) {
+    if (units[index].variant == impl_->variant_index) {
+      impl_->mode_entries[units[index].mode] = image.impl_->entries[index];
+    }
+  }
   return image.report();
 }
 
@@ -434,6 +570,10 @@ Registers Core::registers() const {
 
 void Core::set_registers(const Registers &registers) {
   impl_->stopped();
+  if (!detail::valid_mode(registers.cpsr & mode_bits)) {
+    throw std::invalid_argument("invalid processor mode");
+  }
+  impl_->save_bank(impl_->runtime.banks);
   impl_->runtime.r = registers.r;
   impl_->runtime.cpsr = registers.cpsr;
   impl_->runtime.spsr = registers.spsr;
@@ -453,7 +593,10 @@ Snapshot Core::save() const {
 void Core::restore(const Snapshot &snapshot) {
   impl_->stopped();
   impl_->continuation = snapshot.impl_->state;
-  set_registers(snapshot.impl_->state.registers);
+  impl_->runtime.r = snapshot.impl_->state.registers.r;
+  impl_->runtime.cpsr = snapshot.impl_->state.registers.cpsr;
+  impl_->runtime.spsr = snapshot.impl_->state.registers.spsr;
+  impl_->runtime.banks = snapshot.impl_->state.banks;
   impl_->external_entry = snapshot.impl_->external_entry;
   impl_->pending_image = snapshot.impl_->pending_image;
   impl_->runtime.instructions = snapshot.impl_->state.progress.instructions;
@@ -480,14 +623,26 @@ void Core::request_yield() {
   impl_->runtime.signal = static_cast<std::uint32_t>(detail::Signal::yielded);
 }
 
-bool Core::interrupt_ready(InterruptRequest /*request*/) const {
+bool Core::interrupt_ready(InterruptRequest request) const {
   impl_->stopped();
-  detail::refuse(impl_->identity, impl_->runtime.r[15], "interrupt eligibility requires A3");
+  const auto mask = request.kind == InterruptRequest::Kind::fiq ? 0x40U : 0x80U;
+  return (impl_->runtime.cpsr & mask) == 0 && !impl_->continuation.transition_pending &&
+         impl_->continuation.execution != ExecutionState::fault;
 }
 
-void Core::interrupt(InterruptRequest /*request*/) {
+void Core::interrupt(InterruptRequest request) {
   impl_->stopped();
-  detail::refuse(impl_->identity, impl_->runtime.r[15], "interrupt entry requires A3");
+  if (!interrupt_ready(request)) { return; }
+  constexpr std::uint32_t irq_vector = 24;
+  constexpr std::uint32_t fiq_vector = 28;
+  const bool fast = request.kind == InterruptRequest::Kind::fiq;
+  if (impl_->exception({.vector = fast ? fiq_vector : irq_vector,
+                        .mode = fast ? detail::fiq_mode : detail::irq_mode},
+                       impl_->runtime.r[15] + 4,
+                       fast,
+                       true)) {
+    impl_->continuation.execution = ExecutionState::ready;
+  }
 }
 
 void Core::reset(std::uint32_t vector) {
@@ -499,6 +654,7 @@ void Core::reset(std::uint32_t vector) {
   impl_->runtime.r[15] = vector;
   impl_->runtime.cpsr = Registers::reset_cpsr;
   impl_->runtime.spsr = 0;
+  impl_->runtime.banks = {};
   impl_->runtime.instructions = 0;
   impl_->runtime.cycles = 0;
   impl_->runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);

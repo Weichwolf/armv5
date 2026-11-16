@@ -10,6 +10,16 @@ struct Control {
 
 Control control(std::uint32_t iterations, Control initial);
 
+struct FirShape {
+  std::size_t outputs, taps;
+  unsigned repetitions;
+};
+
+void fir(const std::uint32_t *input,
+         const std::uint32_t *coefficients,
+         std::uint32_t *output,
+         FirShape shape);
+
 struct CopyShape {
   std::size_t words;
   unsigned repetitions;

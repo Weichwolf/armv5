@@ -43,7 +43,15 @@ struct CodeTransition {
 };
 
 struct State {
+  struct Banks {
+    std::array<std::uint32_t, 7> user{}, fiq{}; // R8..R14; user also serves System mode.
+    std::array<std::uint32_t, 2> irq{}, supervisor{}, abort{}, undefined{}; // R13..R14.
+    std::array<std::uint32_t, 5> spsr{}; // FIQ, IRQ, Supervisor, Abort, Undefined.
+    bool operator==(const Banks &) const = default;
+  };
+
   Registers registers;
+  Banks banks;
   Progress progress;
   ExecutionState execution = ExecutionState::ready;
   Fault fault;
@@ -62,6 +70,8 @@ struct RunResult {
 struct CodeSpan {
   std::uint32_t address = 0;
   std::span<const std::byte> bytes;
+  // Empty inherits CompileOptions::processor_mode; shared code lists every mode.
+  std::span<const std::uint32_t> processor_modes;
 };
 
 struct CodeVariant {

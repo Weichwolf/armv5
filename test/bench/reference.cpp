@@ -33,4 +33,19 @@ std::uint32_t copy(const std::uint32_t *source, std::uint32_t *destination, Copy
   }
   return checksum;
 }
+
+void fir(const std::uint32_t *input,
+         const std::uint32_t *coefficients,
+         std::uint32_t *output,
+         FirShape shape) {
+  for (unsigned repetition = 0; repetition < shape.repetitions; ++repetition) {
+    for (std::size_t sample = 0; sample < shape.outputs; ++sample) {
+      std::uint32_t sum = 0;
+      for (std::size_t tap = 0; tap < shape.taps; ++tap) {
+        sum += input[sample + tap] * coefficients[tap];
+      }
+      output[sample] = sum;
+    }
+  }
+}
 }

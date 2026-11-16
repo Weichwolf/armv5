@@ -40,7 +40,12 @@ llvm::Value *Lowering::slow_access(
   auto *callee = load(ir_.getPtrTy(), offsetof(Runtime, access));
   auto *result = ir_.CreateCall(
       type, callee, {runtime_, address, c32(width), c32(operation), value, replacement});
-  guard(ir_.CreateICmpEQ(ir_.CreateLShr(result, c64(32)), c64(0)), values, Signal::memory, address);
+  auto *ordinary = block("memory.accepted");
+  auto *failed = block("memory.failed");
+  cold_branch(ir_.CreateICmpEQ(ir_.CreateLShr(result, c64(32)), c64(0)), ordinary, failed);
+  ir_.SetInsertPoint(failed);
+  finish_exit(values, load(ir_.getInt32Ty(), offsetof(Runtime, signal)), address);
+  ir_.SetInsertPoint(ordinary);
   pending_signal_ = load(ir_.getInt32Ty(), offsetof(Runtime, signal));
   return ir_.CreateTrunc(result, ir_.getInt32Ty());
 }
@@ -66,7 +71,7 @@ llvm::Value *Lowering::access(
     ir_.CreateCondBr(within, mapped, next);
     ir_.SetInsertPoint(mapped);
     const bool allowed = operation == 0 ? region.readable : region.writable;
-    guard(ir_.getInt1(allowed), values, Signal::memory, address);
+    guard(ir_.getInt1(allowed), values, Signal::data_abort, address);
     auto *descriptor = ir_.CreateGEP(ir_.getInt8Ty(), direct_, c64(index * sizeof(DirectRegion)));
     if (operation == 1) {
       auto *safe = ir_.CreateLoad(
@@ -233,6 +238,27 @@ void Lowering::memory(const Instruction &instruction, Values &values) {
   if (plan.writeback) { values.r[plan.base] = adjusted; }
 }
 
+bool Lowering::multiple_user_bank(const Instruction &instruction) const {
+  const auto word = instruction.word;
+  constexpr std::uint32_t list_mask = 0xffff;
+  const auto list = word & list_mask;
+  const auto base_index = (word >> 16) & 15;
+  const bool reading = (word & 0x00100000) != 0;
+  const bool writeback = (word & 0x00200000) != 0;
+  const bool user = (word & 0x00400000) != 0 && !exception_return(instruction);
+  if ((word & 0x00400000) != 0 && (mode_ == user_mode || mode_ == system_mode)) {
+    refuse(image_.identity, instruction.pc, "unpredictable user-bank transfer in User/System mode");
+  }
+  if (user && writeback) {
+    refuse(image_.identity, instruction.pc, "unpredictable user-bank transfer with writeback");
+  }
+  if (writeback && (list & (1U << base_index)) != 0 &&
+      (reading || unsigned(std::countr_zero(list)) != base_index)) {
+    refuse(image_.identity, instruction.pc, "unpredictable/unknown multiple writeback overlap");
+  }
+  return user;
+}
+
 void Lowering::multiple(const Instruction &instruction, Values &values) {
   const auto word = instruction.word;
   constexpr std::uint32_t list_mask = 0xffff;
@@ -241,12 +267,9 @@ void Lowering::multiple(const Instruction &instruction, Values &values) {
   const auto base_index = (word >> 16) & 15;
   const bool reading = (word & 0x00100000) != 0;
   const bool writeback = (word & 0x00200000) != 0;
+  const bool user = multiple_user_bank(instruction);
   const bool up = (word & 0x00800000) != 0;
   const bool pre = (word & 0x01000000) != 0;
-  if (writeback && (list & (1U << base_index)) != 0 &&
-      (reading || unsigned(std::countr_zero(list)) != base_index)) {
-    refuse(image_.identity, instruction.pc, "unpredictable/unknown multiple writeback overlap");
-  }
   auto *base = values.r[base_index];
   // ARMv5 multiple transfers ignore address bits 1:0 when alignment checking is off.
   auto *start = up ? ir_.CreateAdd(base, c32(pre ? 4 : 0))
@@ -256,8 +279,15 @@ void Lowering::multiple(const Instruction &instruction, Values &values) {
   for (unsigned index = 0; index < 16; ++index) {
     if ((list & (1U << index)) == 0) { continue; }
     auto *address = ir_.CreateAdd(start, c32(offset));
-    auto *loaded = access(values, address, 4, reading ? 0 : 1, reg(instruction, values, index));
-    if (reading) { values.r[index] = loaded; }
+    auto *stored = user && index != 15 ? user_reg(values, index) : reg(instruction, values, index);
+    auto *loaded = access(values, address, 4, reading ? 0 : 1, stored);
+    if (reading) {
+      if (user) {
+        set_user_reg(values, index, loaded);
+      } else {
+        values.r[index] = loaded;
+      }
+    }
     offset += 4;
   }
   if (writeback) {

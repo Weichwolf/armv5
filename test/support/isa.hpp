@@ -146,7 +146,7 @@ public:
                                      .readable = true,
                                      .writable = true,
                                      .executable = false}};
-    spans.front() = {.address = program.address(), .bytes = code};
+    spans.front() = {.address = program.address(), .bytes = code, .processor_modes = {}};
     for (unsigned index = 0; index < regions.size(); ++index) {
       layout_regions[index] = {.address = regions[index].address,
                                .size = regions[index].bytes.size(),

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "lower.hpp"
 
+#include "armv5/core.hpp"
 #include "decode.hpp"
 #include "image.hpp"
 #include "runtime.hpp"
@@ -77,9 +78,6 @@ bool classify_alu(const Image &image, std::string_view name, Instruction &result
   if ((opcode == 13 || opcode == 15) && ((word >> 16) & 15) != 0) {
     refuse(image.identity, pc, "unpredictable move source field");
   }
-  if (!test && destination == 15 && (word & 0x00100000) != 0) {
-    refuse(image.identity, pc, "SPSR exception return requires A3");
-  }
   result.terminates = !test && destination == 15;
   result.cycles += unsigned(register_shift) + (result.terminates ? 2 : 0);
   return true;
@@ -122,9 +120,7 @@ bool classify_multiple(const Image &image, std::string_view name, Instruction &r
     if (count == 0 || ((word >> 16) & 15) == 15) {
       refuse(image.identity, pc, "unpredictable multiple transfer register list/base");
     }
-    if ((word & 0x00400000) != 0) {
-      refuse(image.identity, pc, "user-bank/exception multiple transfer requires A3");
-    }
+
     result.terminates = name == "LDM" && (word & 0x8000) != 0;
     result.cycles = result.terminates ? unsigned(count + 4) : unsigned(std::max(count, 2));
     return true;
@@ -132,7 +128,30 @@ bool classify_multiple(const Image &image, std::string_view name, Instruction &r
   return false;
 }
 
+bool classify_multiply(const Image &image, std::string_view name, Instruction &result) {
+  const auto word = result.word;
+  const auto pc = result.pc;
+  if (name == "MUL" || name == "MLA") {
+    const auto destination = (word >> 16) & 15;
+    const auto accumulator = (word >> 12) & 15;
+    if (destination == 15 || ((word >> 8) & 15) == 15 || (word & 15) == 15 ||
+        (name == "MLA" ? accumulator == 15 : accumulator != 0)) {
+      refuse(image.identity, pc, "unpredictable multiply register/accumulator field");
+    }
+    result.operation = Operation::multiply;
+    result.cycles = (word & 0x00100000) != 0 ? 4 : 2;
+    return true;
+  }
+  return false;
+}
+
 Instruction classify(const Image &image, std::uint32_t pc, std::uint32_t word) {
+  constexpr std::uint32_t undefined_mask = 0x0ff000f0;
+  constexpr std::uint32_t undefined_value = 0x07f000f0;
+  if ((word >> condition_shift) != 15 && (word & undefined_mask) == undefined_value) {
+    return {
+        .pc = pc, .word = word, .operation = Operation::undefined, .cycles = 3, .terminates = true};
+  }
   std::string_view name;
   try {
     name = decode_arm(word);
@@ -140,7 +159,7 @@ Instruction classify(const Image &image, std::uint32_t pc, std::uint32_t word) {
   Instruction result{
       .pc = pc, .word = word, .operation = Operation::alu, .cycles = 1, .terminates = false};
   if (classify_alu(image, name, result) || classify_memory(image, name, result) ||
-      classify_multiple(image, name, result)) {
+      classify_multiple(image, name, result) || classify_multiply(image, name, result)) {
     return result;
   }
   if (name == "B" || name == "BL") {
@@ -161,10 +180,11 @@ Instruction classify(const Image &image, std::uint32_t pc, std::uint32_t word) {
     return result;
   }
   if (name == "MSR") {
-    if ((word & 0x00400000) != 0 || (word & 0x00010000) != 0) {
-      refuse(image.identity, pc, "SPSR/control MSR requires A3");
-    }
     result.operation = Operation::msr;
+    constexpr std::uint32_t non_flag_fields = 0x00070000;
+    result.cycles = (word & non_flag_fields) != 0 ? 3 : 1;
+    constexpr std::uint32_t saved_control_mask = 0x00410000;
+    result.terminates = (word & saved_control_mask) == 0x00010000;
     return result;
   }
   if (name == "PLD") {
@@ -174,6 +194,12 @@ Instruction classify(const Image &image, std::uint32_t pc, std::uint32_t word) {
   if (name == "SWP" || name == "SWPB") {
     result.operation = Operation::swap;
     result.cycles = 2;
+    return result;
+  }
+  if (name == "SWI" || name == "BKPT") {
+    result.operation = name == "SWI" ? Operation::software_interrupt : Operation::breakpoint;
+    result.cycles = 3;
+    result.terminates = true;
     return result;
   }
   std::string reason(name);
@@ -191,7 +217,8 @@ std::uint32_t branch_target(const Instruction &instruction) {
 Lowering::Lowering(Image &image,
                    const Variant &variant,
                    llvm::Module &module,
-                   const std::string &name)
+                   const std::string &name,
+                   std::uint32_t mode)
     : image_(image),
       variant_(variant),
       module_(module),
@@ -202,6 +229,7 @@ Lowering::Lowering(Image &image,
                                  llvm::GlobalValue::ExternalLinkage,
                                  name,
                                  module)),
+      mode_(mode),
       runtime_(function_->getArg(0)) {
   function_->addFnAttr(llvm::Attribute::NoUnwind);
 }
@@ -242,6 +270,8 @@ Join Lowering::join(const llvm::Twine &name) {
   Join result{.block = block(name), .values = {}};
   llvm::IRBuilder<> builder(result.block);
   for (auto &reg : result.values.r) { reg = builder.CreatePHI(ir_.getInt32Ty(), 2); }
+  for (auto &reg : result.values.user) { reg = builder.CreatePHI(ir_.getInt32Ty(), 2); }
+  result.values.spsr = builder.CreatePHI(ir_.getInt32Ty(), 2);
   result.values.status = builder.CreatePHI(ir_.getInt32Ty(), 2);
   result.values.instructions = builder.CreatePHI(ir_.getInt64Ty(), 2);
   result.values.cycles = builder.CreatePHI(ir_.getInt64Ty(), 2);
@@ -252,6 +282,11 @@ void Lowering::incoming(Join &destination, const Values &values, llvm::BasicBloc
   for (unsigned index = 0; index < values.r.size(); ++index) {
     llvm::cast<llvm::PHINode>(destination.values.r[index])->addIncoming(values.r[index], source);
   }
+  for (unsigned index = 0; index < values.user.size(); ++index) {
+    llvm::cast<llvm::PHINode>(destination.values.user[index])
+        ->addIncoming(values.user[index], source);
+  }
+  llvm::cast<llvm::PHINode>(destination.values.spsr)->addIncoming(values.spsr, source);
   llvm::cast<llvm::PHINode>(destination.values.status)->addIncoming(values.status, source);
   llvm::cast<llvm::PHINode>(destination.values.instructions)
       ->addIncoming(values.instructions, source);
@@ -267,6 +302,12 @@ void Lowering::materialize(const Values &values) {
   for (unsigned index = 0; index < values.r.size(); ++index) {
     store(values.r[index], offsetof(Runtime, r) + (index * sizeof(std::uint32_t)));
   }
+  for (unsigned index = 0; index < values.user.size(); ++index) {
+    store(user_reg(values, index + 8),
+          offsetof(Runtime, banks) + offsetof(State::Banks, user) +
+              (index * sizeof(std::uint32_t)));
+  }
+  store(values.spsr, offsetof(Runtime, spsr));
   store(values.status, offsetof(Runtime, cpsr));
   store(values.instructions, offsetof(Runtime, instructions));
   store(values.cycles, offsetof(Runtime, cycles));
@@ -276,7 +317,14 @@ void Lowering::finish_exit(const Values &values, llvm::Value *signal, llvm::Valu
   auto *source = ir_.GetInsertBlock();
   llvm::cast<llvm::PHINode>(exit_signal_)->addIncoming(signal, source);
   llvm::cast<llvm::PHINode>(exit_address_)->addIncoming(address, source);
-  jump(exit_, values);
+  auto saved = values;
+  if (abort_base_ != nullptr) {
+    saved.r[abort_register_] =
+        ir_.CreateSelect(ir_.CreateICmpEQ(signal, c32(static_cast<unsigned>(Signal::data_abort))),
+                         abort_base_,
+                         saved.r[abort_register_]);
+  }
+  jump(exit_, saved);
 }
 
 void Lowering::exit(const Values &values, Signal signal, llvm::Value *address) {
@@ -310,6 +358,12 @@ Values Lowering::entry_values() {
     values.r[index] =
         load(ir_.getInt32Ty(), offsetof(Runtime, r) + (index * sizeof(std::uint32_t)));
   }
+  for (unsigned index = 0; index < values.user.size(); ++index) {
+    values.user[index] = load(ir_.getInt32Ty(),
+                              offsetof(Runtime, banks) + offsetof(State::Banks, user) +
+                                  (index * sizeof(std::uint32_t)));
+  }
+  values.spsr = load(ir_.getInt32Ty(), offsetof(Runtime, spsr));
   values.status = load(ir_.getInt32Ty(), offsetof(Runtime, cpsr));
   values.instructions = load(ir_.getInt64Ty(), offsetof(Runtime, instructions));
   values.cycles = load(ir_.getInt64Ty(), offsetof(Runtime, cycles));
@@ -384,6 +438,7 @@ void Lowering::transfer(Values values, llvm::Value *target, bool exchange) {
 void Lowering::analyze() {
   std::set<std::uint32_t> leaders(variant_.entries.begin(), variant_.entries.end());
   for (const auto &span : variant_.spans) {
+    if (std::ranges::find(span.modes, mode_) == span.modes.end()) { continue; }
     leaders.insert(span.address);
     for (std::size_t offset = 0; offset < span.bytes.size(); offset += 4) {
       const auto pc = span.address + static_cast<std::uint32_t>(offset);
@@ -427,9 +482,56 @@ void Lowering::branch_instruction(const Instruction &instruction, Values values)
   edge(values, branch_target(instruction));
 }
 
+bool Lowering::emit_event(const Instruction &instruction, Values &values, llvm::Value *old_status) {
+  const bool mode_change = instruction.operation == Operation::msr && instruction.terminates;
+  if (exception_return(instruction) || mode_change) {
+    auto *status = mode_change ? values.status : values.spsr;
+    llvm::Value *valid = ir_.getFalse();
+    for (const auto mode : {user_mode,
+                            fiq_mode,
+                            irq_mode,
+                            supervisor_mode,
+                            abort_mode,
+                            undefined_mode,
+                            system_mode}) {
+      valid =
+          ir_.CreateOr(valid, ir_.CreateICmpEQ(ir_.CreateAnd(status, c32(mode_mask)), c32(mode)));
+    }
+    // Validate before retiring: an unpredictable return is an explicit refusal.
+    auto refused = values;
+    refused.instructions = ir_.CreateSub(values.instructions, c64(1));
+    refused.cycles = ir_.CreateSub(values.cycles, c64(instruction.cycles));
+    refused.r[15] = c32(instruction.pc);
+    refused.status = old_status;
+    guard(valid, refused, Signal::unsupported, c32(instruction.pc));
+    values.status = old_status;
+    if (mode_change) { values.r[15] = c32(instruction.pc + 4); }
+    exit(values, mode_change ? Signal::status : Signal::exception_return, status);
+    return true;
+  }
+  if (instruction.operation == Operation::software_interrupt ||
+      instruction.operation == Operation::undefined ||
+      instruction.operation == Operation::breakpoint) {
+    auto signal = Signal::prefetch_abort;
+    if (instruction.operation == Operation::software_interrupt) {
+      signal = Signal::software_interrupt;
+    }
+    if (instruction.operation == Operation::undefined) { signal = Signal::undefined; }
+    exit(values, signal, c32(instruction.pc));
+    return true;
+  }
+  return false;
+}
+
 void Lowering::emit_instruction(const Instruction &instruction, Values &values) {
   values.r[15] = c32(instruction.pc);
   pending_signal_ = c32(0);
+  abort_base_ = nullptr;
+  if (instruction.operation == Operation::multiple || instruction.operation == Operation::single ||
+      instruction.operation == Operation::extra || instruction.operation == Operation::swap) {
+    abort_register_ = (instruction.word >> 16) & 15;
+    abort_base_ = values.r[abort_register_];
+  }
   if (instruction.operation == Operation::branch) {
     branch_instruction(instruction, values);
     return;
@@ -450,8 +552,13 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
     ir_.CreateBr(taken);
   }
   ir_.SetInsertPoint(taken);
+  auto *old_status = values.status;
   switch (instruction.operation) {
     case Operation::alu: alu(instruction, values); break;
+    case Operation::multiply: multiply(instruction, values); break;
+    case Operation::software_interrupt:
+    case Operation::undefined:
+    case Operation::breakpoint: values.r[15] = c32(instruction.pc + 4); break;
     case Operation::branch: break; // Emitted above with direct known successors.
     case Operation::exchange: {
       auto *target = reg(instruction, values, instruction.word & 15);
@@ -474,8 +581,9 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
       instruction.operation == Operation::multiple || instruction.operation == Operation::swap) {
     signal_guard(values);
   }
-  jump(merged, values);
+  if (!emit_event(instruction, values, old_status)) { jump(merged, values); }
   ir_.SetInsertPoint(merged.block);
+  abort_base_ = nullptr;
   values = merged.values;
   if (instruction.terminates) {
     transfer(values,
@@ -529,7 +637,6 @@ void Lowering::emit() {
   auto *entry = block("entry");
   ir_.SetInsertPoint(entry);
   const auto initial = entry_values();
-  spsr_ = load(ir_.getInt32Ty(), offsetof(Runtime, spsr));
   instruction_bound_ = load(ir_.getInt64Ty(), offsetof(Runtime, instruction_bound));
   cycle_bound_ = load(ir_.getInt64Ty(), offsetof(Runtime, cycle_bound));
   direct_ = load(ir_.getPtrTy(), offsetof(Runtime, direct));
@@ -562,9 +669,11 @@ void lower_llvm(Image &image) {
   llvm::LLVMContext context;
   llvm::Module module(image.identity, context);
   module.setTargetTriple(llvm::sys::getDefaultTargetTriple());
-  for (const auto &variant : image.variants) {
-    const auto name = "armv5_" + image.key + "_v" + std::to_string(variant.id);
-    Lowering(image, variant, module, name).emit();
+  for (const auto &unit : image.units) {
+    const auto &variant = image.variants[unit.variant];
+    const auto name =
+        "armv5_" + image.key + "_v" + std::to_string(variant.id) + "_m" + std::to_string(unit.mode);
+    Lowering(image, variant, module, name, unit.mode).emit();
     image.exports.push_back(name);
   }
   std::string error;

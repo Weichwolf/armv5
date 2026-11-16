@@ -2,6 +2,7 @@
 #include "armv5/core.hpp"
 #include "reference.hpp"
 #include "support/isa.hpp"
+#include "support/modes.hpp"
 
 #include <algorithm>
 #include <array>
@@ -332,6 +333,162 @@ void control_kernel(Counters &counters) {
   }
   report("K4", guests, program.bytes().size() / 4, machine.prepared().report(), native, reference);
 }
+
+constexpr std::uint32_t output_immediate = 0x902, count_immediate = 0xb01, mla_r3 = 0xe0233594,
+                        event_return = 0xe25ef004, irq_vector = 0x18, supervisor = 0x13,
+                        irq_processor_mode = 0x12, coefficient_multiplier = 73,
+                        coefficient_offset = 19, fir_completed_status = 0x60000013;
+constexpr unsigned taps = 64, outputs = 1024, repetitions = 32;
+constexpr std::uint32_t input_address = 0x4000, coefficient_address = 0x6000,
+                        output_address = 0x8000;
+constexpr std::uint64_t quantum = 256, interval = 4096;
+
+fixture::Program fir_program() {
+  fixture::Program code;
+  code.word(fixture::data(13, false, 8, 0, false, 12));
+  code.word(fixture::data(13, false, 10, 0, true, output_immediate)); // 0x8000
+  code.word(fixture::data(13, false, 6, 0, true, count_immediate));   // 1024
+  const auto output = code.pc();
+  code.word(fixture::data(13, false, 0, 0, false, 8));
+  code.word(fixture::data(13, false, 1, 0, false, 9));
+  code.word(fixture::data(13, false, 2, 0, true, taps));
+  code.word(fixture::data(13, false, 3, 0, true, 0));
+  const auto tap = code.pc();
+  code.word(fixture::transfer(true, false, 4, 0, 4, false));
+  code.word(fixture::transfer(true, false, 5, 1, 4, false));
+  code.word(mla_r3); // MLA R3,R4,R5,R3
+  code.word(fixture::data(2, true, 2, 2, true, 1));
+  code.word(fixture::branch(code.pc(), {.address = tap}, 1));
+  code.word(fixture::transfer(false, false, 3, 10, 4, false));
+  code.word(fixture::data(4, false, 8, 8, true, 4));
+  code.word(fixture::data(2, true, 6, 6, true, 1));
+  code.word(fixture::branch(code.pc(), {.address = output}, 1));
+  code.word(fixture::data(2, true, 7, 7, true, 1));
+  code.word(fixture::branch(code.pc(), {.address = code.address()}, 1));
+  code.word(fixture::branch(code.pc(), {.address = code.pc()}));
+  return code;
+}
+
+void run_events(armv5::Core &core, std::uint64_t cycles) {
+  std::uint64_t next_event = interval;
+  for (auto bound = quantum;; bound += quantum) {
+    const auto result = core.run_until(std::min(bound, cycles));
+    fixture::require(result.execution == armv5::ExecutionState::ready, result.fault.reason);
+    const auto now = core.state().progress.base_cycles;
+    if (now >= cycles) { return; }
+    if (now >= next_event) {
+      fixture::require(core.interrupt_ready({}), "K6 missed interrupt boundary");
+      core.interrupt({});
+      next_event += interval;
+    }
+  }
+}
+
+void event_kernel(Counters &counters) {
+  const auto program = fir_program();
+  fixture::Program handler(irq_vector);
+  handler.word(fixture::data(4, false, 13, 13, true, 1)); // The banked IRQ SP is the event counter.
+  handler.word(event_return);                             // SUBS PC,LR,#4
+  fixture::Modes machine({{.program = program, .modes = {supervisor}},
+                          {.program = handler, .modes = {irq_processor_mode}}},
+                         {irq_vector});
+  std::vector<std::uint32_t> input(outputs + taps - 1);
+  std::vector<std::uint32_t> coefficients(taps);
+  std::vector<std::uint32_t> output(outputs);
+  std::vector<std::uint32_t> answer(outputs);
+  constexpr std::uint32_t seed = 0x9e3779b9;
+  constexpr std::uint32_t sample_mask = 0xffff;
+  constexpr std::uint32_t sign_bias = 0x8000;
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    input[index] = (std::uint32_t(index) * seed & sample_mask) - sign_bias;
+    fixture::put(std::span(machine.ram).subspan(index * 4, 4), input[index]);
+  }
+  for (std::size_t index = 0; index < coefficients.size(); ++index) {
+    coefficients[index] =
+        ((std::uint32_t(index) * coefficient_multiplier + coefficient_offset) & sample_mask) -
+        sign_bias;
+    fixture::put(
+        std::span(machine.ram).subspan(coefficient_address - input_address + (index * 4), 4),
+        coefficients[index]);
+  }
+  benchmark::fir(input.data(),
+                 coefficients.data(),
+                 answer.data(),
+                 {.outputs = outputs, .taps = taps, .repetitions = 1});
+  const auto initial_ram = machine.ram;
+  auto expected = initial_ram;
+  for (std::size_t index = 0; index < answer.size(); ++index) {
+    fixture::put(std::span(expected).subspan(output_address - input_address + (index * 4), 4),
+                 answer[index]);
+  }
+  constexpr std::uint64_t algorithm_guests =
+      std::uint64_t(repetitions) * (3 + outputs * (4 + 5 * taps + 4) + 2);
+  constexpr std::uint64_t algorithm_cycles =
+      (std::uint64_t(repetitions) * ((outputs * (8 * taps + 8)) + 5)) - 2;
+  std::uint64_t events = 0;
+  while (events != (algorithm_cycles + (7 * events) - 1) / interval) {
+    events = (algorithm_cycles + (7 * events) - 1) / interval;
+  }
+  const auto cycles = algorithm_cycles + (7 * events);
+  const auto guests = algorithm_guests + (2 * events);
+  auto initialize = [&] {
+    std::ranges::copy(initial_ram, machine.ram.begin());
+    machine.core->reset(program.address());
+    auto registers = machine.core->registers();
+    registers.cpsr = supervisor;
+    registers.r[7] = repetitions;
+    registers.r[9] = coefficient_address;
+    registers.r[12] = input_address;
+    machine.core->set_registers(registers);
+  };
+  auto work = [&] { run_events(*machine.core, cycles); };
+  armv5::Registers expected_registers;
+  expected_registers.cpsr = fir_completed_status;
+  expected_registers.r[0] = input_address + (outputs + taps - 1) * 4;
+  expected_registers.r[1] = coefficient_address + taps * 4;
+  expected_registers.r[3] = answer.back();
+  expected_registers.r[4] = input.back();
+  expected_registers.r[5] = coefficients.back();
+  expected_registers.r[8] = input_address + outputs * 4;
+  expected_registers.r[9] = coefficient_address;
+  expected_registers.r[10] = output_address + outputs * 4;
+  expected_registers.r[12] = input_address;
+  expected_registers.r[15] = program.pc() - 4;
+  auto check = [&] {
+    const auto state = machine.core->state();
+    fixture::require(machine.ram == expected && state.registers == expected_registers &&
+                         state.banks.irq[0] == events &&
+                         state.progress ==
+                             armv5::Progress{.instructions = guests, .base_cycles = cycles},
+                     "K6 complete FIR output/registers/RAM, event count and progress");
+  };
+  initialize();
+  work();
+  check();
+  std::vector<Measurement> native;
+  std::vector<Measurement> reference;
+  for (unsigned trial = 0; trial < 3; ++trial) {
+    initialize();
+    native.push_back(measure(counters, work));
+    check();
+  }
+  for (unsigned trial = 0; trial < 3; ++trial) {
+    reference.push_back(measure(counters, [&] {
+      benchmark::fir(input.data(),
+                     coefficients.data(),
+                     output.data(),
+                     {.outputs = outputs, .taps = taps, .repetitions = repetitions});
+    }));
+    fixture::require(output == answer, "K6 C++ complete output");
+  }
+  report("K6",
+         guests,
+         (program.bytes().size() + handler.bytes().size()) / 4,
+         machine.prepared().report(),
+         native,
+         reference);
+}
+
 }
 
 int main(int argc, char **argv) {
@@ -342,10 +499,11 @@ int main(int argc, char **argv) {
                  "guest_per_second,native_over_clang_O3_seconds,preparation_seconds,native_text_"
                  "bytes,text_bytes_per_prepared_instruction\n";
     const std::string_view selected = argc > 1 ? argv[1] : "all";
-    fixture::require(selected == "all" || selected == "K4" || selected == "K5",
+    fixture::require(selected == "all" || selected == "K4" || selected == "K5" || selected == "K6",
                      "unknown benchmark kernel");
     if (selected == "all" || selected == "K5") { copy_kernel(counters); }
     if (selected == "all" || selected == "K4") { control_kernel(counters); }
+    if (selected == "all" || selected == "K6") { event_kernel(counters); }
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';
     return 1;

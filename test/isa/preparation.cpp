@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "armv5/core.hpp"
 #include "support/isa.hpp"
+#include "support/modes.hpp"
 
 #include <array>
 #include <bit>
@@ -404,10 +405,10 @@ void preparation_refusals() {
       Case{.word = 0xf1080080, .reason = "undefined unconditional"},
       Case{.word = 0xfc410f02, .reason = "undefined coprocessor extension"},
       Case{.word = 0xe10f0100, .reason = "control/DSP encoding"},
-      Case{.word = 0xe0000291, .reason = "MUL: instruction is not lowered"},
+      Case{.word = 0xe0810293, .reason = "UMULL: instruction is not lowered"},
       Case{.word = 0xe18200d0, .reason = "doubleword index/destination overlap"},
       Case{.word = 0xe1e000f8, .reason = "writeback overlap/PC"},
-      Case{.word = 0xef000000, .reason = "SWI: instruction is not lowered"}};
+      Case{.word = 0xee100f10, .reason = "MRC: instruction is not lowered"}};
   for (const auto &[word, reason] : cases) {
     fixture::Program program;
     program.word(word);
@@ -436,6 +437,7 @@ int main() {
     status_and_predicated_memory();
     swaps();
     preparation_refusals();
+    processor_modes();
     std::cout << "Installed ARM arithmetic, predication, shifts and transfers passed\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

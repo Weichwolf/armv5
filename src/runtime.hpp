@@ -17,7 +17,13 @@ enum class Signal : std::uint8_t {
   memory,
   unprepared,
   unsupported,
-  transfer
+  transfer,
+  status,
+  exception_return,
+  software_interrupt,
+  undefined,
+  prefetch_abort,
+  data_abort
 };
 
 struct DirectRegion {
@@ -28,6 +34,7 @@ struct DirectRegion {
 struct Runtime {
   std::array<std::uint32_t, 16> r{};
   std::uint32_t cpsr = Registers::reset_cpsr, spsr = 0;
+  State::Banks banks;
   std::uint64_t instructions = 0, cycles = 0, instruction_bound = 0, cycle_bound = 0;
   std::uint32_t signal = 0; // Fixed-width field in the private LLVM/native ABI.
   std::uint32_t address = 0;
