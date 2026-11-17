@@ -162,6 +162,16 @@ Cache execution/maintenance, debug IFSR qualification and remaining CP15
 operations are pending; cache-enabled configurations cannot yet be installed.
 See `isa-coverage.md`.
 
+The profile has no external coprocessors in slots 0–13. Their MRC/MCR, CDP,
+LDC/STC and MCRR/MRRC instructions take Undefined before operand transfer, memory
+access or writeback. The ARMv5 unconditional MRC2/MCR2/CDP2/LDC2/STC2 forms do so
+regardless of NZCV. CP15 accepts privileged ordinary MRC/MCR; its other legal
+ARMv5 instruction classes take Undefined. A false ordinary predicate suppresses
+the exception. Unsupported CP15 register selectors retain explicit preparation
+refusals; this does not invent defined behavior for unpredictable selectors.
+ARMv6 MCRR2/MRRC2 are outside this profile and cannot be prepared. Internal CP14
+debug behavior remains pending and is not treated as an absent external device.
+
 ## Execution and snapshots
 
 `run(n)` returns after exactly n complete instructions, or earlier on a refusal,

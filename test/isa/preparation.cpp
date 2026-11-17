@@ -435,6 +435,9 @@ void preparation_refusals() {
       Case{.word = 0xe0400291, .reason = "undefined multiply"},
       Case{.word = 0xf1080080, .reason = "undefined unconditional"},
       Case{.word = 0xfc410f02, .reason = "undefined coprocessor extension"},
+      Case{.word = 0xfc4320d9, .reason = "undefined coprocessor extension"},
+      Case{.word = 0xfc532fd9, .reason = "undefined coprocessor extension"},
+      Case{.word = 0xec0320d9, .reason = "undefined coprocessor extension"},
       Case{.word = 0xe10f0100, .reason = "control/DSP encoding"},
       Case{.word = 0xe08f0293, .reason = "unpredictable long/DSP multiply"},
       Case{.word = 0xe18200d0, .reason = "doubleword index/destination overlap"},
@@ -468,6 +471,7 @@ int main() {
     status_and_predicated_memory();
     swaps();
     system_registers();
+    coprocessor_instructions();
     memory_control();
     external_aborts();
     mmu_instructions();

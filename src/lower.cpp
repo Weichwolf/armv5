@@ -180,23 +180,21 @@ bool classify_dsp(const Image &image, std::string_view name, Instruction &result
 }
 
 bool classify_system(std::string_view name, Instruction &result) {
-  if (name == "MRC" || name == "MCR") {
-    const auto word = result.word;
-    const auto coprocessor = (word >> 8) & 15;
-    if (coprocessor < 14) {
-      result.operation = Operation::undefined;
-      result.cycles = 3;
-      result.terminates = true;
-      return true;
-    }
-    if (coprocessor == 15) {
-      result.operation = name == "MRC" ? Operation::system_read : Operation::system_write;
-      result.terminates = name == "MCR";
-      result.cycles = name == "MRC" && ((word >> 12) & 15) == 15 ? 4 : 1;
-      return true;
-    }
+  constexpr std::array names{
+      "MRC", "MCR", "MRC2", "MCR2", "CDP", "CDP2", "LDC", "LDC2", "STC", "STC2", "MRRC", "MCRR"};
+  if (std::ranges::find(names, name) == names.end()) { return false; }
+  const auto word = result.word;
+  const auto coprocessor = (word >> 8) & 15;
+  if (coprocessor == 14) { return false; }
+  result.operation = Operation::undefined;
+  result.cycles = 3;
+  result.terminates = true;
+  if (coprocessor == 15 && (name == "MRC" || name == "MCR")) {
+    result.operation = name == "MRC" ? Operation::system_read : Operation::system_write;
+    result.terminates = name == "MCR";
+    result.cycles = name == "MRC" && ((word >> 12) & 15) == 15 ? 4 : 1;
   }
-  return false;
+  return true;
 }
 
 } // namespace

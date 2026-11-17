@@ -622,3 +622,57 @@ Jazelle behavior and exhaustive profile qualification remain open. Exact declare
 mapping contexts remain required; general M=1 performance is unqualified. CoreMark,
 final own/generated-code sanitizers and macOS ARM64 qualification remain pending.
 This is not A5 completion.
+
+## Absent coprocessors and illegal CP15 classes
+
+All legal ARMv5 coprocessor classes now lower to precise Undefined when the
+external slot (0–13) is absent. This includes the unconditional opcode space.
+CP15's illegal classes use the same architectural exception path; CP14 stays
+explicitly unimplemented. Preparation still rejects ARMv6 double-register
+unconditional forms and malformed extension encodings. These classes reuse the
+existing Undefined exit and owner exception entry.
+
+Independent installed programs check all external numbers and the illegal CP15
+classes, all seven modes, both byte orders and fixed/dynamic storage. Each case
+checks a completed ADDS SSA prefix, true/false predicates or unconditional
+execution, complete registers/banks/NZCVQ, exact LR/SPSR/vector/progress, exception
+return, unchanged RAM/fault registers and zero callbacks. Memory forms include
+long, pre/post-index, up/down, writeback, unindexed and literal encodings; even
+unaligned/unmapped operands do not access memory. The new fixture refuses MCR2
+preparation against the preceding published library. Existing semantic goldens
+were retained.
+
+Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release and warm median-of-three user
+hardware-counter method as the MMU increment (`perf_event_paranoid=2`). All six
+complete outputs/hashes, K6's 34,042 IRQs and 256-cycle bounds pass. Rounded host
+instruction counts and native text sizes are unchanged; the measured cycle
+counts are reported below, without a zero-regression claim. No overhead or
+K4/ABI experiment was performed.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 8.289 | 2.234 | 0.546396 | 1830.175 | 6.953x | 0.114717 | 8,144 | 290.857 |
+| K2 | 6.172 | 1.677 | 0.410865 | 2433.891 | 3.043x | 0.256928 | 17,876 | 259.072 |
+| K3 | 5.646 | 1.497 | 0.366018 | 2732.103 | 0.979x | 0.250610 | 17,081 | 271.127 |
+| K4 | 12.205 | 2.974 | 0.727439 | 1374.686 | 11.902x | 0.730506 | 24,758 | 434.351 |
+| K5 | 8.007 | 2.210 | 0.553877 | 1805.454 | 41.322x | 0.073449 | 5,526 | 502.364 |
+| K6 | 12.742 | 4.106 | 1.015657 | 984.584 | 12.935x | 0.122099 | 9,030 | 301.000 |
+
+Guest instruction/base-cycle totals and the 100% native guest share are unchanged.
+Compiler identity:
+
+```text
+armv5-fc7b94b9a3366e95cfad50c97f918d432b4eab80bdc7d384f7e0461008257a91-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites in the working tree and source-only
+export, configured tidy/format, and six installed SDK consumers. All 57 build/
+source/test inputs match the tested export byte-for-byte; the installed library
+matches the final build. The new two-header consumer checks absent LDC and illegal
+CP15 CDP2 after an ADDS prefix, fault-register preservation, zero callbacks and
+snapshot restoration. Published totals: `src/` 5,083 (-2), `test/` 8,343 (+214)
+against the MMU increment. Existing semantic goldens were retained.
+
+A5 remains open for cache execution/maintenance, write-buffer ordering, internal
+CP14/debug, Jazelle/BXJ and exhaustive profile qualification. CoreMark and final
+own/generated-code sanitizers follow; macOS ARM64 remains untested.
