@@ -398,8 +398,8 @@ struct Core::Impl {
       accepted = present && callback(io.owner, address, width, value);
     }
     if (accepted) { return value; }
-    runtime.signal =
-        static_cast<std::uint32_t>(present ? detail::Signal::memory : detail::Signal::data_abort);
+    runtime.signal = static_cast<std::uint32_t>(present ? detail::Signal::memory
+                                                        : detail::Signal::external_abort);
     runtime.address = address;
     return access_failure;
   }
@@ -421,7 +421,7 @@ struct Core::Impl {
                              .replacement = replacement});
     }
     if ((operation != 1 && !region->readable) || (operation != 0 && !region->writable)) {
-      runtime->signal = static_cast<std::uint32_t>(detail::Signal::data_abort);
+      runtime->signal = static_cast<std::uint32_t>(detail::Signal::external_abort);
       runtime->address = address;
       return access_failure;
     }

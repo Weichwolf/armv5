@@ -50,7 +50,18 @@ llvm::Value *Lowering::slow_access(
   auto *failed = block("memory.failed");
   cold_branch(ir_.CreateICmpEQ(ir_.CreateLShr(result, c64(32)), c64(0)), ordinary, failed);
   ir_.SetInsertPoint(failed);
-  finish_exit(values, load(ir_.getInt32Ty(), offsetof(Runtime, signal)), address);
+  auto *signal = load(ir_.getInt32Ty(), offsetof(Runtime, signal));
+  auto *aborted = block("memory.external.abort");
+  auto *finish = block("memory.failure.exit");
+  auto *external = ir_.CreateICmpEQ(signal, c32(static_cast<unsigned>(Signal::external_abort)));
+  ir_.CreateCondBr(external, aborted, finish);
+  ir_.SetInsertPoint(aborted);
+  external_abort(address);
+  ir_.CreateBr(finish);
+  ir_.SetInsertPoint(finish);
+  finish_exit(values,
+              ir_.CreateSelect(external, c32(static_cast<unsigned>(Signal::data_abort)), signal),
+              address);
   ir_.SetInsertPoint(ordinary);
   pending_signal_ = load(ir_.getInt32Ty(), offsetof(Runtime, signal));
   return ir_.CreateTrunc(result, ir_.getInt32Ty());
@@ -105,7 +116,7 @@ llvm::Value *Lowering::access(
     ir_.CreateCondBr(within, mapped, next);
     ir_.SetInsertPoint(mapped);
     const bool allowed = operation == 0 ? region.readable : region.writable;
-    guard(ir_.getInt1(allowed), values, Signal::data_abort, address);
+    guard(ir_.getInt1(allowed), values, Signal::external_abort, address);
     auto *descriptor = ir_.CreateGEP(ir_.getInt8Ty(), direct_, c64(index * sizeof(DirectRegion)));
     if (operation == 1) {
       auto *safe = ir_.CreateLoad(
@@ -148,6 +159,25 @@ llvm::Value *Lowering::access(
   return result;
 }
 
+void Lowering::external_abort(llvm::Value *address) {
+  // ARM926 DDI 0198E table 3-10 reports the final MVA of the aborted burst,
+  // split at a 1KB boundary. Keep this work entirely on the real abort edge.
+  auto *far = access_first_;
+  if (access_count_ > 1) {
+    constexpr std::uint32_t burst_mask = 0xfffffc00;
+    constexpr std::uint32_t last_word = 0x3fc;
+    auto *first_page = ir_.CreateAnd(access_first_, c32(burst_mask));
+    auto *last = ir_.CreateAdd(access_first_, c32((access_count_ - 1) * 4));
+    auto *same_page = ir_.CreateICmpEQ(ir_.CreateAnd(last, c32(burst_mask)), first_page);
+    auto *first_end =
+        ir_.CreateSelect(same_page, last, ir_.CreateOr(access_first_, c32(last_word)));
+    far = ir_.CreateSelect(
+        ir_.CreateICmpEQ(ir_.CreateAnd(address, c32(burst_mask)), first_page), first_end, last);
+  }
+  store(c32(8), offsetof(Runtime, system) + offsetof(Registers::System, data_fault_status));
+  store(far, offsetof(Runtime, system) + offsetof(Registers::System, fault_address));
+}
+
 bool Lowering::load_exchange() const {
   return (variant_.mapping.control & 0x8000) == 0;
 }
@@ -170,6 +200,8 @@ void Lowering::swap_memory(const Instruction &instruction, Values &values) {
   }
   auto *base = values.r[base_index];
   const unsigned width = (word & 0x00400000) != 0 ? 1 : 4;
+  access_first_ = base;
+  access_count_ = 1;
   alignment(values, base, width);
   auto *address = width == 4 ? ir_.CreateAnd(base, c32(arm_pc_mask)) : base;
   auto *loaded = access(values, address, width, 2, values.r[word & 15]);
@@ -258,6 +290,8 @@ void Lowering::memory(const Instruction &instruction, Values &values) {
   auto *offset = transfer_offset(instruction, values, plan);
   auto *adjusted = plan.up ? ir_.CreateAdd(base, offset) : ir_.CreateSub(base, offset);
   auto *address = plan.pre ? adjusted : base;
+  access_first_ = address;
+  access_count_ = plan.count;
   alignment(values, address, plan.width);
   if (plan.extra && plan.width > 1) {
     guard(ir_.CreateICmpEQ(ir_.CreateAnd(address, c32(plan.count == 2 ? 7 : 1)), c32(0)),
@@ -322,6 +356,8 @@ void Lowering::multiple(const Instruction &instruction, Values &values) {
   // ARMv5 multiple transfers ignore address bits 1:0 when alignment checking is off.
   auto *start = up ? ir_.CreateAdd(base, c32(pre ? 4 : 0))
                    : ir_.CreateSub(base, c32((count * 4) - (pre ? 0 : 4)));
+  access_first_ = start;
+  access_count_ = count;
   alignment(values, start, 4);
   start = ir_.CreateAnd(start, c32(arm_pc_mask));
   unsigned offset = 0;

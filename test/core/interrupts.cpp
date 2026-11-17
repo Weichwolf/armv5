@@ -176,6 +176,8 @@ void data_aborts() {
                            result.progress.instructions == 0 && result.progress.base_cycles == 3 &&
                            machine.core->registers().r[15] == 0x10 &&
                            machine.core->registers().r[14] == program.address() + 8 &&
+                           machine.core->registers().system.data_fault_status == 8 &&
+                           machine.core->registers().system.fault_address == last + 4 &&
                            machine.core->registers().r[0] == registers.r[0] &&
                            machine.core->registers().r[1] == registers.r[1] &&
                            machine.core->registers().r[2] == registers.r[2],
@@ -245,6 +247,8 @@ void abort_after_code_write() {
                        core.registers().r[0] == original.address() &&
                        core.registers().r[14] == original.address() + 8 &&
                        core.registers().r[15] == vector.address() &&
+                       core.registers().system.data_fault_status == 8 &&
+                       core.registers().system.fault_address == original.address() + 4 &&
                        core.registers().spsr == registers.cpsr && storage == changed.bytes(),
                    "data abort entry precedes code-binding revocation after a partial store");
   (void)core.install(native, 1);

@@ -107,7 +107,8 @@ private:
   std::uint32_t emitting_pc_ = 0;
   llvm::Value *runtime_, *instruction_bound_{nullptr}, *cycle_bound_{nullptr}, *direct_{nullptr};
   llvm::Value *pending_signal_ = nullptr, *abort_base_ = nullptr;
-  unsigned abort_register_ = 0;
+  unsigned abort_register_ = 0, access_count_ = 1;
+  llvm::Value *access_first_ = nullptr;
   Join exit_;
   llvm::Value *exit_signal_ = nullptr, *exit_address_ = nullptr;
   std::vector<Instruction> code_;
@@ -207,6 +208,7 @@ private:
   void validate_transfer(const Instruction &instruction, const Transfer &plan) const;
   llvm::Value *
   transfer_offset(const Instruction &instruction, const Values &values, const Transfer &plan);
+  void external_abort(llvm::Value *address);
   void alignment(Values &values, llvm::Value *address, unsigned width);
   [[nodiscard]] bool load_exchange() const;
   void swap_memory(const Instruction &instruction, Values &values);

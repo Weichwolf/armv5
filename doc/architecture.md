@@ -114,6 +114,11 @@ Instruction binding checks split storage views at ITCM boundaries; DTCM is never
 an instruction source. A-bit alignment guards specialize at preparation and run
 before any access or register update; A=0 units gain no guards. An alignment exit
 records DFSR/FAR and enters the ordinary abort path with its exact SSA prefix.
+Physical external-abort producers use a distinct internal signal; the lowered
+cold edge records DFSR and the instruction's original/burst MVA before ordinary
+Data Abort entry. Transfer geometry stays in preparation-time SSA metadata and
+is evaluated only on the abort edge. Host callback refusals preserve fault
+registers, and future MMU fault producers retain their own status classification.
 L4 specializes PC-load exchange in ordinary and yielding paths. The owner applies
 V before validating actual vector declarations. MMU/cache effects and maintenance
 remain explicit open work.

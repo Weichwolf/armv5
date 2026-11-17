@@ -111,9 +111,19 @@ their independent state-change semantics. V selects exception addresses in
 `0xffff0000..0xffff001c`; each actual high vector and its mode must be declared.
 Reset uses fixed low-vector/little-endian input pins (V=B=0).
 
+With the MMU disabled, missing physical storage or denied region permissions
+record external-abort status 8 in DFSR and the original access MVA in FAR. For
+multiple/doubleword transfers, ARM926 records the final MVA of the aborted burst:
+the last transfer before a 1KB boundary if an earlier word aborts, or the last
+transfer address if the first abort is after that boundary. This can differ from
+the failing word. IFSR is preserved. A present I/O callback returning false is a
+host memory fault and leaves DFSR/FAR/IFSR unchanged, including after a partial
+multiple transfer. Missing vector declarations still report the actual vector;
+fault registers already reflect the architectural data abort.
+
 MMU/cache execution effects and maintenance remain open; those configurations
-cannot yet be installed. External-abort DFSR/FAR and debug/prefetch IFSR updates
-and remaining CP15 operations are pending. See `isa-coverage.md`.
+cannot yet be installed. Debug/prefetch IFSR classification and remaining CP15
+operations are pending. See `isa-coverage.md`.
 
 ## Execution and snapshots
 

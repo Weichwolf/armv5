@@ -18,6 +18,7 @@ void dsp_instructions();
 void thumb_instructions();
 void system_registers();
 void tcm_accesses();
+void external_aborts();
 
 namespace fixture {
 inline constexpr unsigned condition_shift = 28, immediate_bit = 25, opcode_shift = 21,

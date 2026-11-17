@@ -401,6 +401,10 @@ void Lowering::guard(llvm::Value *valid,
   auto *cold = block("refusal");
   cold_branch(valid, ordinary, cold);
   ir_.SetInsertPoint(cold);
+  if (signal == Signal::external_abort) {
+    external_abort(address);
+    signal = Signal::data_abort;
+  }
   exit(values, signal, address);
   ir_.SetInsertPoint(ordinary);
 }

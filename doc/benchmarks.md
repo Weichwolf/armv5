@@ -502,3 +502,60 @@ MMU/FCSE/TLB/cache execution and maintenance, external/debug/prefetch fault-stat
 qualification and remaining coprocessor/Jazelle behavior remain open. CoreMark,
 final sanitizers and macOS ARM64 qualification are pending. This is not A5
 completion.
+
+
+## External data-abort fault registers
+
+MMU-disabled external data aborts now record DFSR status 8 and the ARM926 FAR
+value. The prepared instruction retains original-MVA and transfer geometry;
+only a real external-abort edge evaluates burst-end/1KB-boundary behavior and
+writes fault registers. A distinct physical-abort signal keeps host callback
+refusals and future MMU fault classifications separate. IFSR is preserved.
+
+Independent fixtures check all seven modes, both byte orders, fixed/dynamic
+memory, original byte offsets, byte/halfword/signed/word transfers, SWP/SWPB,
+doubleword and multiple transfers. Explicit expected FAR tables cover failures
+before and after a 1KB boundary and the top of the address space. Complete
+register/memory prefixes, base restoration, fault-register MRC readback and
+snapshots are checked. A denied second loop turn retains its exact counter,
+flags and progress. Existing range and code-write abort fixtures keep their
+checks and add fault-register expectations. The new fixtures fail against the
+preceding published library at the missing DFSR/FAR update.
+
+All six full outputs/hashes and K6's 34,042 IRQs/256-cycle bounds pass. Default
+fixed-layout instruction counts regress for K1, K3, K5 and K6; K1 is 8.289 I/GI
+versus 7.941 previously. Cold fault bookkeeping changes generated code; exact host-instruction
+attribution has not been established. This
+is **not** a no-regression result. Fixed-mapping performance remains an A5
+validation item. The benchmark and its numerical contract are unchanged.
+
+Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release and warm median-of-three user
+hardware-counter method as above, with `perf_event_paranoid=2`.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 8.289 | 2.235 | 0.548762 | 1822.282 | 6.989x | 0.114370 | 8,144 | 290.857 |
+| K2 | 6.172 | 1.676 | 0.409896 | 2439.644 | 3.011x | 0.257613 | 17,876 | 259.072 |
+| K3 | 5.646 | 1.507 | 0.371956 | 2688.490 | 0.994x | 0.250251 | 17,081 | 271.127 |
+| K4 | 12.205 | 2.974 | 0.727484 | 1374.600 | 11.903x | 0.730439 | 24,758 | 434.351 |
+| K5 | 8.007 | 2.213 | 0.555039 | 1801.674 | 41.690x | 0.077857 | 5,526 | 502.364 |
+| K6 | 12.742 | 3.978 | 0.975487 | 1025.129 | 12.421x | 0.121762 | 9,030 | 301.000 |
+
+Guest instructions/base cycles per sample are unchanged; native guest share is
+100%. No K4 call/ABI tuning was performed.
+
+```text
+armv5-3afce20c64b5ebb84c88c7a222dc3e20841be2851c749234bd045202cd3f7e45-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites, configured tidy/format, source-only
+export build and installed SDK consumers. The new consumer uses only the two
+public headers, partially loads a four-word transfer, observes FAR at the final
+burst word instead of the failing second word and reads it through guest MRC;
+snapshot restore retains the exact abort state. The export's build inputs and
+the SDK library were compared byte-for-byte with the final implementation.
+Published totals: `src/` 4,433 (+43), `test/` 6,810 (+376) against the A/L4/V
+increment. MMU/FCSE/TLB/cache execution and maintenance, debug/prefetch status
+qualification and remaining coprocessor/Jazelle behavior are still open.
+CoreMark, final sanitizers and macOS ARM64 qualification remain pending.
+This is not A5 completion.

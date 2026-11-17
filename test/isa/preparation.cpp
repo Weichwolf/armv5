@@ -395,7 +395,12 @@ void memory_boundary_case(MemoryCase test) {
     const auto aligned = test.byte ? address : address & ~std::uint32_t{3};
     const unsigned width = test.byte ? 1 : 4;
     const bool valid = aligned >= base && std::uint64_t(aligned) + width <= base + test.size;
-    if (valid) { expected_memory_access(test, address, expected, expected_ram); }
+    if (valid) {
+      expected_memory_access(test, address, expected, expected_ram);
+    } else {
+      expected.system.data_fault_status = 8;
+      expected.system.fault_address = address;
+    }
     const auto result = machine.core->run(1);
     fixture::require(machine.core->registers() == expected && machine.ram == expected_ram &&
                          result.progress == armv5::Progress{.instructions = unsigned(valid),
@@ -464,6 +469,7 @@ int main() {
     swaps();
     system_registers();
     memory_control();
+    external_aborts();
     tcm_accesses();
     preparation_refusals();
     memory_boundaries();

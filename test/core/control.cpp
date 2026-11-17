@@ -5,12 +5,14 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 
 namespace {
 constexpr std::uint32_t entry = 0x1000, vector_base = 0xffff0000, saved_flags = 0xa8000000,
-                        fault_address = 0x4001, high_alignment = 0x2002, stale_data = 0x55,
-                        stale_instruction = 0xaa, stale_address = 0x12345678, arm_nop = 0xe1a00000,
-                        thumb_nop = 0x46c0, swi = 0xef000000, exception_return = 0xe1b0f00e;
+                        fault_address = 0x4001, denied_address = 0x4004, high_alignment = 0x2002,
+                        stale_data = 0x55, stale_instruction = 0xaa, stale_address = 0x12345678,
+                        arm_nop = 0xe1a00000, thumb_nop = 0x46c0, swi = 0xef000000,
+                        exception_return = 0xe1b0f00e;
 
 enum class Cause : std::uint8_t { software, undefined, breakpoint, alignment, irq, fiq };
 
@@ -165,11 +167,38 @@ struct AbortObserver {
   }
 };
 
-void alignment_loop_prefix() {
+void deny_second_word(fixture::Modes &machine) {
+  machine.regions.back().bytes = std::span(machine.ram).first(4);
+  machine.regions.push_back({.address = denied_address,
+                             .bytes = std::span(machine.ram).subspan(4, 4),
+                             .readable = false,
+                             .writable = false});
+  machine.layout.back().size = 4;
+  machine.layout.push_back(
+      {.address = denied_address, .size = 4, .readable = false, .writable = false});
+  machine.core->set_memory({.regions = machine.regions, .generation = 1});
+  const std::array variants{
+      armv5::CodeVariant{.id = 0,
+                         .spans = machine.spans,
+                         .entries = machine.entries,
+                         .mapping = machine.core->registers().system.mapping}};
+  const std::array layouts{armv5::VariantLayout{.variant = 0, .regions = machine.layout}};
+  const armv5::CodeImage image{.identity = "authored-loop-external-abort",
+                               .variants = variants,
+                               .layouts = layouts,
+                               .transitions = {},
+                               .interrupt_vectors = machine.vectors};
+  machine.native.emplace(armv5::Core::compile(image));
+  (void)machine.core->install(*machine.native, 0);
+}
+
+void loop_abort_prefix(bool external) {
   fixture::Program code;
   fixture::Program handler(0x10);
-  // LDR R2,[R0]; ADD R0,R0,#1; SUBS R3,R3,#1. Second turn is unaligned.
-  constexpr std::array body{0xe5902000U, 0xe2800001U, 0xe2533001U};
+  // The second turn either becomes unaligned or reaches denied storage.
+  const std::array body{fixture::transfer(true, false, 2, 0, 0),
+                        fixture::data(4, false, 0, 0, true, external ? 4 : 1),
+                        fixture::data(2, true, 3, 3, true, 1)};
   for (const auto instruction : body) { code.word(instruction); }
   code.word(fixture::branch(code.pc(), {.address = code.address()}, 1)); // BNE.
   constexpr std::uint32_t observe_abort = 0xe5954000;
@@ -178,7 +207,8 @@ void alignment_loop_prefix() {
   constexpr unsigned budget = 100;
   handler.word(observe_abort); // LDR R4,[R5]: observe entry, then yield.
   AbortObserver observer;
-  const armv5::Registers::System::Mapping mapping{.control = 0x5007a};
+  armv5::Registers::System::Mapping mapping;
+  mapping.control |= external ? 0 : 2;
   fixture::Modes machine({{.program = code, .modes = {fixture::supervisor_mode}},
                           {.program = handler, .modes = {fixture::abort_mode}}},
                          {0x10},
@@ -186,6 +216,7 @@ void alignment_loop_prefix() {
                          0x10000,
                          {.owner = &observer, .read = &AbortObserver::read},
                          mapping);
+  if (external) { deny_second_word(machine); }
   observer.cpu = machine.core.get();
   auto registers = machine.core->registers();
   registers.r[0] = 0x4000;
@@ -193,14 +224,14 @@ void alignment_loop_prefix() {
   registers.r[5] = 0x20000;
   machine.core->set_registers(registers);
   auto expected = machine.core->state();
-  expected.registers.r[0] = fault_address;
+  expected.registers.r[0] = external ? denied_address : fault_address;
   expected.registers.r[3] = 2;
   expected.registers.r[14] = entry + 8;
   expected.registers.r[15] = 0x10;
   expected.registers.cpsr = abort_status;
   expected.registers.spsr = saved_status;
-  expected.registers.system.data_fault_status = 1;
-  expected.registers.system.fault_address = fault_address;
+  expected.registers.system.data_fault_status = external ? 8 : 1;
+  expected.registers.system.fault_address = expected.registers.r[0];
   expected.banks.abort[1] = entry + 8;
   expected.banks.spsr[3] = saved_status;
   expected.progress = {.instructions = 4, .base_cycles = 9};
@@ -209,13 +240,13 @@ void alignment_loop_prefix() {
   fixture::require(observer.entry == expected &&
                        result.execution == armv5::ExecutionState::yielded &&
                        result.progress == armv5::Progress{.instructions = 5, .base_cycles = 10},
-                   "alignment fault inside a granted loop retains the completed turn, counter "
+                   "data abort inside a granted loop retains the completed turn, counter "
                    "and SUBS flags at the exact abort prefix");
   const auto after = machine.core->state();
   machine.core->restore(before);
   (void)machine.core->run(budget);
   fixture::require(observer.entry == expected && machine.core->state() == after,
-                   "granted alignment fault snapshot replay has no later turn residue");
+                   "granted data-abort snapshot replay has no later turn residue");
 }
 
 void undeclared_high_vector() {
@@ -247,6 +278,7 @@ void control_lifecycle() {
   for (const bool big : {false, true}) {
     for (const bool thumb : {false, true}) { high_vectors(big, thumb); }
   }
-  alignment_loop_prefix();
+  loop_abort_prefix(false);
+  loop_abort_prefix(true);
   undeclared_high_vector();
 }
