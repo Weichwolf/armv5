@@ -676,3 +676,75 @@ against the MMU increment. Existing semantic goldens were retained.
 A5 remains open for cache execution/maintenance, write-buffer ordering, internal
 CP14/debug, Jazelle/BXJ and exhaustive profile qualification. CoreMark and final
 own/generated-code sanitizers follow; macOS ARM64 remains untested.
+
+## DCache execution, lockdown and maintenance
+
+Prepared C/M-enabled variants now execute the ARM926 DCache: four-way 8KB storage,
+32-byte lines, two 16-byte dirty halves, MVA lookup, saved physical writeback tags,
+critical-word-first fills, WT/WB policies, nonallocating write misses, RR or
+deterministic pseudo-random replacement and way lockdown. DCache c7 maintenance
+includes all/MVA/Set-Way invalidation, clean, clean-and-invalidate, test-clean and
+test-clean-invalidate. External buffered stores/writebacks complete synchronously;
+drain preserves ordering and does not clean dirty cache lines. Bus queue timing
+and cache miss penalties are outside the nominal cycle model.
+
+The memory helper preserves SSA values on RAM/cache paths and uses a cold retry
+for real callbacks. An earlier yield survives subsequent probes within a multiple
+transfer. WT SWP preserves its old value across retry. Writebacks go to the saved
+physical bus tag even after PTE/TLB/TCM changes. A code-changing clean revokes
+before a successor; the first changed MVA survives later unchanged words. Partial
+non-abortable writeback failures retain their host-memory diagnostic and completed
+bus writes, without retiring the failed maintenance instruction or changing FSRs.
+Hidden cache bytes, tags, dirty state and replacement continuation are snapshots;
+rebind/install preserves them and reset invalidates them.
+
+Independent public fixtures cover ARM/Thumb, every ARM mode, both byte orders,
+fixed/dynamic storage, all M/C and page C/B policies, byte/half/signed/unaligned/
+double/multiple/SWP forms, AP checks on hits, LDRT/STRT, false predicates,
+critical-word-first callback order, partial failures/yield, every implemented
+DCache maintenance operation, way selection/eviction, all-locked fallback,
+FCSE MVA operands, physical remaps, TCM priority, rebind and pending code-change
+snapshots. Reserved TTBR/PID assumptions refuse before native access. The old
+lockdown-read golden was incorrect: DDI 0198E 2.3.10 requires bits 15:4 to read
+as ones, so reset is `0xfff0`. The implementation and that expectation are
+corrected together; legal guest read-modify-write and reset now verify the format.
+Other existing semantic goldens are retained.
+
+The common K1–K6 programs use M=0 fixed layouts. They gain no cache lookup; all
+rounded host instruction counts and generated text sizes remain unchanged from
+the preceding coprocessor increment. Complete outputs/hashes, 34,042 K6 IRQs and
+256-cycle bounds pass. These are common-kernel measurements, not a DCache/M=1
+performance qualification or a zero-regression claim for the A5 sequence. No
+K4/ABI or overhead experiment was performed.
+
+Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release and warm median-of-three user
+hardware-counter method, with `perf_event_paranoid=2`.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 8.289 | 2.238 | 0.554851 | 1802.285 | 6.978x | 0.118310 | 8,144 | 290.857 |
+| K2 | 6.172 | 1.678 | 0.418573 | 2389.068 | 3.035x | 0.269517 | 17,876 | 259.072 |
+| K3 | 5.646 | 1.495 | 0.370699 | 2697.605 | 0.984x | 0.259281 | 17,081 | 271.127 |
+| K4 | 12.205 | 2.977 | 0.738957 | 1353.258 | 11.344x | 0.793675 | 24,758 | 434.351 |
+| K5 | 8.007 | 2.241 | 0.548008 | 1824.792 | 42.508x | 0.070591 | 5,526 | 502.364 |
+| K6 | 12.742 | 3.982 | 0.997736 | 1002.269 | 12.400x | 0.125738 | 9,030 | 301.000 |
+
+Guest instruction/base-cycle totals and the 100% native guest share are unchanged.
+Compiler identity:
+
+```text
+armv5-4baaab8f3eedb71be1dde590c358f48a5a9c10c755db711a5a3f944e0e665532-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites in the working tree and source-only
+export, configured tidy/format, and seven installed SDK consumers. All 61 build/
+source/test inputs match the tested export byte-for-byte; the SDK library matches
+the final build. The new two-header consumer checks dirty-data visibility, clean,
+test/invalidate/refill, exact snapshot replay and the corrected reset format.
+Published totals: `src/` 5,529 (+446), `test/` 9,604 (+1,261) against the
+coprocessor increment.
+
+ICache execution/maintenance, WFI, remaining debug/CP14/Jazelle behavior and the
+exhaustive profile audit remain open. Exact declared mapping contexts remain
+required; general M=1 performance is unqualified. CoreMark and final own/generated-
+code sanitizers follow; macOS ARM64 remains untested. This is not A5 completion.

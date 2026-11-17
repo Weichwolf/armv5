@@ -98,6 +98,40 @@ void mapping_bindings() {
   fixture::require(refused, "cached artifact identity includes CP15 mapping assumptions");
 }
 
+void reserved_mapping() {
+  for (const bool process : {false, true}) {
+    fixture::Program code;
+    code.word(fixture::data(13, false, 0, 0, true, 3));
+    Image image(std::move(code));
+    armv5::Registers::System::Mapping mapping;
+    if (process) {
+      mapping.process_id = 1;
+    } else {
+      mapping.translation_table = 1;
+    }
+    image.variants[0].mapping = mapping;
+    const auto native = armv5::Core::compile(image.declaration());
+    const std::array regions{
+        armv5::Memory::Region{.address = entry, .bytes = image.code, .executable = true}};
+    armv5::Core core({.regions = regions, .generation = 0});
+    auto registers = core.registers();
+    registers.r[15] = entry;
+    registers.system.mapping = mapping;
+    core.set_registers(registers);
+    const auto before = core.state();
+    bool refused = false;
+    try {
+      (void)core.install(native, 0);
+    } catch (const std::runtime_error &error) {
+      fixture::contains(error.what(), "reserved CP15 translation/PID mapping bits");
+      refused = true;
+    }
+    fixture::require(
+        refused && core.state() == before,
+        "unrepresentable TTBR/PID reserved bits refuse installation before native memory accesses");
+  }
+}
+
 void storage_spaces() {
   fixture::Program code;
   constexpr std::array instructions{0xee100f50U, 0xee191f11U, 0xee192f31U, 0xe5943000U};
@@ -212,5 +246,6 @@ void storage_spaces() {
 
 void system_lifecycle() {
   mapping_bindings();
+  reserved_mapping();
   storage_spaces();
 }

@@ -55,8 +55,8 @@ instruction/data TCM region registers. Fault-status/address, context ID and
 lockdown registers are separate fields. They are included in state inspection
 and snapshots. The current profile reports r0p5 ID `0x41069265`, 16KB instruction
 and 8KB data caches, four ways and 32-byte lines. MMU/FCSE translation and TLB
-operations execute as described below. Cache execution effects remain pending;
-reporting geometry does not enable caches.
+operations and DCache execution are described below. ICache execution remains
+pending; reporting its geometry does not enable it.
 
 `CodeVariant::mapping` optionally declares the CP15 assumptions for that coherent
 variant. Omission inherits the reset mapping and `CompileOptions::big_endian`.
@@ -99,7 +99,7 @@ Executable validation splits spans at ITCM boundaries. Writes through any host
 alias of actual prepared code revoke the binding, including an ITCM alias.
 Ignoring a write to read-only size bits does not revoke an unchanged binding.
 
-Prepared variants support the M, A, B, S, R, V and L4 control bits. With A set,
+Prepared variants support the M, A, C, B, S, R, V, RR and L4 control bits. With A set,
 unaligned word/halfword accesses take Data Abort before any memory access or writeback;
 byte accesses remain allowed. The first unaligned transfer address is recorded in
 FAR and DFSR becomes 1; IFSR is preserved. An alignment abort retires no instruction
@@ -158,9 +158,58 @@ binding even if its bytes match; an undeclared translated alias still refuses.
 TLB maintenance under M=1 revokes through a declared transition, which may target
 the same variant. Variants still require their exact declared CP15 context.
 
-Cache execution/maintenance, debug IFSR qualification and remaining CP15
-operations are pending; cache-enabled configurations cannot yet be installed.
-See `isa-coverage.md`.
+The DCache is enabled by C when M is also set. With M clear, data accesses bypass
+the DCache even if C is set. Page C/B select noncacheable/nonbufferable,
+noncacheable/bufferable, write-through or write-back. ITCM/DTCM selection precedes
+the cache lookup. Protection checks precede a cache hit. A read miss fills a
+32-byte line, critical word first with wrap within that line; a write miss writes
+externally without allocation. Write-through hits update both views; write-back
+hits update cached bytes and the affected 16-byte dirty half. SWP/SWPB use one
+owner cache transaction for cacheable storage. Uncached I/O still uses the atomic
+swap role.
+
+The 8KB DCache uses four ways and MVA tags. Each line retains its original physical
+tag for writeback, so editing a page table and invalidating the TLB does not
+change an existing cached line or its writeback destination. Cache maintenance
+MVA operands are already modified addresses; FCSE is not applied again.
+Replacement uses a deterministic pseudo-random stream or a per-set round-robin
+cursor selected by RR. The c9 lockdown L bits exclude ways from new allocations;
+if all four are set, way 3 remains the allocation target. Both lockdown registers
+reset to `0xfff0`: bits 15:4 read as ones and all ways start unlocked. Guest
+read-modify-write sequences preserve those required-one fields. Snapshot restore
+includes cached bytes, tags, dirty halves and replacement continuation. Rebind
+and reinstall preserve that processor state; reset invalidates it.
+
+Supported c7 DCache operations are invalidate-all, invalidate/clean/clean-and-
+invalidate by MVA or Set/Way, test-and-clean, test-clean-and-invalidate and drain
+write buffer. Test operations return bit 30 clear while cleaning one dirty line;
+a later test finds the cache clean and sets bit 30. Other result bits are zero in
+this model. Test-clean-and-invalidate invalidates the cache on that final clean
+test. MRC R15 updates NZCV without a PC transfer. False predicates suppress all
+cache and lockdown effects.
+
+External buffered stores and cache writebacks complete synchronously in program
+order; no pending write is forwarded. Drain is a memory-ordering boundary and
+does not clean dirty cache lines. This models functional ordering without bus
+queues or cache-miss timing. Cache fills/writebacks and buffered writes cannot
+take an ARM926 external abort. Missing/denied physical storage and refusing I/O
+therefore produce an explicit host memory fault, preserving FSR/FAR. Cache line
+fills require all eight physical words to be supplied. Real callbacks observe
+the exact SSA prefix; accepted yield completes the current instruction, including
+all transfers, writeback and flag effects. Partial failed cache clean writes stay
+visible without fabricating instruction retirement.
+
+Dirty DCache code bytes reach the instruction view when written back. A clean or
+eviction that changes bound instruction storage revokes the binding before a
+successor executes. The consumer installs the declared destination variant; a
+missing transition reports the changed MVA. A partial writeback host fault keeps
+its physical diagnostic. CPU snapshots restore hidden cache state and pending
+code transfers without changing consumer storage.
+
+Installation rejects nonzero reserved TTBR/PID bits in declared contexts before
+native memory access. ICache execution/maintenance, WFI, debug IFSR qualification
+and remaining CP15 operations are pending; I-enabled configurations cannot yet be
+installed. See `isa-coverage.md`.
 
 The profile has no external coprocessors in slots 0–13. Their MRC/MCR, CDP,
 LDC/STC and MCRR/MRRC instructions take Undefined before operand transfer, memory

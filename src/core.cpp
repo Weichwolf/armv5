@@ -2,6 +2,7 @@
 #include "armv5/core.hpp"
 
 #include "armv5/memory.hpp"
+#include "cache.hpp"
 #include "identity.hpp"
 #include "image.hpp"
 #include "mmu.hpp"
@@ -57,6 +58,7 @@ struct Snapshot::Impl {
   bool external_entry;
   std::string pending_image;
   detail::Mmu mmu;
+  detail::DataCache data_cache;
 };
 
 Snapshot::Snapshot(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -108,6 +110,7 @@ struct Core::Impl {
   std::vector<HostRange> code_ranges;
   std::string identity, pending_image;
   detail::Mmu mmu;
+  detail::DataCache data_cache;
 
   struct CodeBinding {
     std::uint32_t address, physical, size;
@@ -121,6 +124,7 @@ struct Core::Impl {
     runtime.virtual_access = &virtual_access;
     runtime.fetch = &fetch;
     runtime.invalidate = &invalidate;
+    runtime.cache_operation = &cache_operation;
     rebind(memory);
   }
 
@@ -430,6 +434,42 @@ struct Core::Impl {
     return access_failure;
   }
 
+  std::uint64_t transaction(CallbackAccess request, bool bus) {
+    const auto [address, width, operation, value, replacement] = request;
+    const auto storage =
+        bus ? StorageAddress{.space = Memory::Space::bus, .relative = address, .available = 0}
+            : storage_address(address, false);
+    const auto *region = this->region(storage.relative, width, storage.space);
+    if (region == nullptr) {
+      return callback({.address = address,
+                       .width = width,
+                       .operation = operation,
+                       .value = value,
+                       .replacement = replacement});
+    }
+    if ((operation != 1 && !region->readable) || (operation != 0 && !region->writable)) {
+      runtime.signal = static_cast<std::uint32_t>(detail::Signal::external_abort);
+      runtime.address = address;
+      return access_failure;
+    }
+    auto bytes = region->bytes.subspan(storage.relative - region->address, width);
+    const bool big_endian = (binding->image->variants[variant_index].mapping.control & 0x80) != 0;
+    const bool aliases_code = operation != 0 && code_overlap(bytes);
+    const auto old = operation != 1 || aliases_code ? read_bytes(bytes, big_endian) : 0;
+    if (operation != 0) {
+      write_bytes(bytes, value, big_endian);
+      const auto mask =
+          width == 4 ? std::numeric_limits<std::uint32_t>::max() : (1U << (width * 8)) - 1;
+      if (aliases_code && old != (value & mask)) {
+        if (!revoked) { revocation_address = address; }
+        revoked = true;
+        runtime.signal = static_cast<std::uint32_t>(detail::Signal::changed);
+        runtime.address = address;
+      }
+    }
+    return operation == 0 || operation == 2 ? old : 0;
+  }
+
   static std::uint64_t access(detail::Runtime *runtime,
                               std::uint32_t address,
                               unsigned width,
@@ -437,37 +477,12 @@ struct Core::Impl {
                               std::uint32_t value,
                               std::uintptr_t replacement) noexcept {
     auto &owner = *static_cast<Impl *>(runtime->owner);
-    const auto storage = owner.storage_address(address, false);
-    const auto *region = owner.region(storage.relative, width, storage.space);
-    if (region == nullptr) {
-      return owner.callback({.address = address,
-                             .width = width,
-                             .operation = operation,
-                             .value = value,
-                             .replacement = replacement});
-    }
-    if ((operation != 1 && !region->readable) || (operation != 0 && !region->writable)) {
-      runtime->signal = static_cast<std::uint32_t>(detail::Signal::external_abort);
-      runtime->address = address;
-      return access_failure;
-    }
-    auto bytes = region->bytes.subspan(storage.relative - region->address, width);
-    const bool big_endian =
-        (owner.binding->image->variants[owner.variant_index].mapping.control & 0x80) != 0;
-    const bool aliases_code = operation != 0 && owner.code_overlap(bytes);
-    const auto old = operation != 1 || aliases_code ? read_bytes(bytes, big_endian) : 0;
-    if (operation != 0) {
-      write_bytes(bytes, value, big_endian);
-      const auto mask =
-          width == 4 ? std::numeric_limits<std::uint32_t>::max() : (1U << (width * 8)) - 1;
-      if (aliases_code && old != (value & mask)) {
-        if (!owner.revoked) { owner.revocation_address = address; }
-        owner.revoked = true;
-        runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed);
-        runtime->address = address;
-      }
-    }
-    return operation == 0 || operation == 2 ? old : 0;
+    return owner.transaction({.address = address,
+                              .width = width,
+                              .operation = operation,
+                              .value = value,
+                              .replacement = replacement},
+                             false);
   }
 
   struct TableReader {
@@ -529,6 +544,65 @@ struct Core::Impl {
     return true;
   }
 
+  struct CacheBus {
+    Impl *owner;
+    std::uintptr_t read, write;
+    detail::Runtime::Callbacks callbacks;
+
+    static bool access(void *context, detail::DataCache::BusRequest request, std::uint32_t &value) {
+      const auto &bus = *static_cast<CacheBus *>(context);
+      auto &owner = *bus.owner;
+      const auto replacement = request.writing ? bus.write : bus.read;
+      const auto *mapped = owner.region(request.address, request.width);
+      const bool callback = replacement != 0 || (request.writing ? owner.io.write != nullptr
+                                                                 : owner.io.read != nullptr);
+      if (mapped == nullptr && callback && bus.callbacks == detail::Runtime::Callbacks::probe) {
+        owner.runtime.signal = static_cast<std::uint32_t>(detail::Signal::mmu_callback);
+        return false;
+      }
+      const bool was_revoked = owner.revoked;
+      const auto result = owner.transaction({.address = request.address,
+                                             .width = request.width,
+                                             .operation = request.writing ? 1U : 0U,
+                                             .value = request.value,
+                                             .replacement = replacement},
+                                            true);
+      if ((result & access_failure) != 0) {
+        // ARM926 cache fills/writebacks and buffered stores cannot externally abort.
+        // Missing bus storage is an explicit consumer memory fault instead.
+        owner.runtime.signal = static_cast<std::uint32_t>(detail::Signal::memory);
+        return false;
+      }
+      if (!was_revoked && owner.revoked) { owner.revocation_address = request.mva; }
+      value = static_cast<std::uint32_t>(result);
+      return true;
+    }
+  };
+
+  static std::uint64_t cache_operation(detail::Runtime *runtime,
+                                       std::uint32_t operand,
+                                       unsigned selector,
+                                       detail::Runtime::PageCallback read_callback,
+                                       detail::Runtime::WriteCallback write_callback,
+                                       detail::Runtime::Callbacks callbacks) noexcept {
+    auto &owner = *static_cast<Impl *>(runtime->owner);
+    CacheBus bus{.owner = &owner,
+                 .read = static_cast<std::uintptr_t>(read_callback),
+                 .write = static_cast<std::uintptr_t>(write_callback),
+                 .callbacks = callbacks};
+    std::uint32_t result = 0;
+    if (!owner.data_cache.maintain({.selector = selector,
+                                    .operand = operand,
+                                    .big = (runtime->system.mapping.control & 0x80) != 0},
+                                   &CacheBus::access,
+                                   &bus,
+                                   result)) {
+      return access_failure;
+    }
+    if (owner.revoked) { runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed); }
+    return result;
+  }
+
   static std::uint64_t virtual_access(detail::Runtime *runtime,
                                       std::uint32_t address,
                                       detail::Runtime::Width access_width,
@@ -536,6 +610,7 @@ struct Core::Impl {
                                       std::uint32_t value,
                                       detail::Runtime::DataCallback data_callback,
                                       detail::Runtime::PageCallback page_callback,
+                                      detail::Runtime::WriteCallback write_callback,
                                       std::uint32_t first,
                                       unsigned count,
                                       detail::Runtime::Privilege privilege,
@@ -558,6 +633,31 @@ struct Core::Impl {
     if (width == 4) { translated.mva |= first & 3; }
     if (owner.translation_failure(translated, false, address)) { return access_failure; }
     const auto storage = owner.storage_address(translated.physical, false);
+    if (storage.space == Memory::Space::bus && (runtime->system.mapping.control & 4) != 0 &&
+        (translated.attributes & 2) != 0) {
+      CacheBus bus{.owner = &owner,
+                   .read = page_read,
+                   .write = static_cast<std::uintptr_t>(write_callback),
+                   .callbacks = callbacks};
+      const auto cached = owner.data_cache.access(
+          {.mva = detail::Mmu::modified(runtime->system.mapping, address),
+           .physical = translated.physical,
+           .value = value,
+           .lockdown = runtime->system.data_cache_lockdown,
+           .width = width,
+           .operation = static_cast<detail::DataCache::Operation>(operation),
+           .big = (runtime->system.mapping.control & 0x80) != 0,
+           .back = (translated.attributes & 1) != 0,
+           .round_robin = (runtime->system.mapping.control & 0x4000) != 0},
+          &CacheBus::access,
+          &bus);
+      if (!cached) { return access_failure; }
+      if (owner.revoked) {
+        runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed);
+        runtime->address = address;
+      }
+      return *cached;
+    }
     if (owner.region(storage.relative, width, storage.space) == nullptr &&
         callbacks == detail::Runtime::Callbacks::probe) {
       bool present = replacement != 0;
@@ -580,6 +680,11 @@ struct Core::Impl {
     }
     if ((result & access_failure) != 0 &&
         runtime->signal == static_cast<std::uint32_t>(detail::Signal::external_abort)) {
+      if (operation == 1 && storage.space == Memory::Space::bus &&
+          (translated.attributes & 1) != 0) {
+        runtime->signal = static_cast<std::uint32_t>(detail::Signal::memory);
+        return result;
+      }
       const auto start = detail::Mmu::modified(runtime->system.mapping, first);
       const auto last = start + ((count - 1) * 4);
       constexpr std::uint32_t page_mask = 0xfffffc00;
@@ -918,7 +1023,14 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
     detail::refuse(
         impl_->identity, impl_->runtime.r[15], "unpredictable TCM geometry/base/overlap");
   }
-  constexpr std::uint32_t implemented_control = 0xa383; // M, A, B, S, R, V and L4.
+  constexpr std::uint32_t table_reserved = 0x3fff;
+  constexpr std::uint32_t process_reserved = 0x01ffffff;
+  if ((found->mapping.translation_table & table_reserved) != 0 ||
+      (found->mapping.process_id & process_reserved) != 0) {
+    detail::refuse(
+        impl_->identity, impl_->runtime.r[15], "reserved CP15 translation/PID mapping bits");
+  }
+  constexpr std::uint32_t implemented_control = 0xe387; // M, A, C, B, S, R, V, RR and L4.
   if ((found->mapping.control & ~implemented_control) !=
       Registers::System::Mapping::reset_control) {
     detail::refuse(impl_->identity,
@@ -976,8 +1088,11 @@ State Core::state() const {
 
 Snapshot Core::save() const {
   impl_->stopped();
-  return Snapshot(std::make_shared<Snapshot::Impl>(
-      impl_->inspect(), impl_->external_entry, impl_->pending_image, impl_->mmu));
+  return Snapshot(std::make_shared<Snapshot::Impl>(impl_->inspect(),
+                                                   impl_->external_entry,
+                                                   impl_->pending_image,
+                                                   impl_->mmu,
+                                                   impl_->data_cache));
 }
 
 void Core::restore(const Snapshot &snapshot) {
@@ -1003,6 +1118,7 @@ void Core::restore(const Snapshot &snapshot) {
   }
   impl_->runtime.banks = snapshot.impl_->state.banks;
   impl_->mmu = snapshot.impl_->mmu;
+  impl_->data_cache = snapshot.impl_->data_cache;
   impl_->external_entry = snapshot.impl_->external_entry;
   impl_->pending_image = snapshot.impl_->pending_image;
   impl_->runtime.instructions = snapshot.impl_->state.progress.instructions;
@@ -1065,6 +1181,7 @@ void Core::reset(std::uint32_t vector) {
   const auto data_tcm = impl_->runtime.system.mapping.data_tcm & tcm_size_bits;
   impl_->runtime.system = {};
   impl_->mmu = {};
+  impl_->data_cache = {};
   impl_->runtime.system.mapping.instruction_tcm = instruction_tcm;
   impl_->runtime.system.mapping.data_tcm = data_tcm;
   if (impl_->binding &&

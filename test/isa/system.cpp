@@ -9,7 +9,7 @@
 namespace {
 constexpr std::uint32_t processor_id = 0x41069265, cache_type = 0x1d112152, reset_control = 0x50078,
                         operand = 0x12345678, initial_status = 0x980000d3, non_flags = 0x0fffffff,
-                        fault_bits = 255;
+                        fault_bits = 255, lockdown_reset = 0xfff0;
 
 struct Register {
   unsigned number, selector;
@@ -36,8 +36,20 @@ void identification(bool big) {
                                                 {.number = 13, .selector = 1},
                                                 {.number = 9, .selector = 0},
                                                 {.number = 9, .selector = 1}}};
-  constexpr std::array<std::uint32_t, 14> expected_values{
-      processor_id, cache_type, 0, reset_control, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  constexpr std::array<std::uint32_t, 14> expected_values{processor_id,
+                                                          cache_type,
+                                                          0,
+                                                          reset_control,
+                                                          0,
+                                                          0,
+                                                          0,
+                                                          0,
+                                                          0,
+                                                          0,
+                                                          0,
+                                                          0,
+                                                          lockdown_reset,
+                                                          lockdown_reset};
   fixture::Program code(0x1000, big);
   for (unsigned index = 0; index < registers.size(); ++index) {
     code.word(transfer(true, index, registers[index]));

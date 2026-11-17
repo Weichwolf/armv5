@@ -8,8 +8,8 @@ A4 adds classic Thumb/interworking, integer/DSP multiplication and all six
 checked kernels. The initial A5 increment adds CP15 register state, context-bound
 variants and separate consumer-owned TCM storage spaces; subsequent increments
 add guest mapping writes, active TCM routing and A/L4/V controls. MMU/FCSE
-translation and unified TLB maintenance now execute; cache effects and profile
-completion remain open. See
+translation, unified TLB maintenance and DCache execution/maintenance now execute;
+ICache effects and profile completion remain open. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text
@@ -133,7 +133,21 @@ instruction effects. Installation peeks translations without filling the TLB or
 calling I/O. Code changes through translated aliases and physical remaps revoke
 bindings. Unified TLB state and lockdown continuation belong to snapshots, not
 ordinary state inspection. TLB invalidation revokes M=1 bindings through declared
-transitions. Cache effects and maintenance remain explicit open work.
+transitions.
+
+DCache accesses extend the same architectural memory helper. Cacheable accesses
+retain MVA tags, physical writeback tags, dirty halves and replacement/lockdown
+state in the owner; snapshots copy that state only on request. Page permissions
+and TCM routing precede lookup. Read fills and writebacks use the consumer's read
+and write roles, including cold callback probe/retry with an exact SSA prefix.
+An earlier yield remains pending across later probes in a multiple transfer.
+The uncached and cache bus paths share one physical transaction implementation;
+writeback addresses go directly to the bus even after TCM remapping. A code-changing
+writeback preserves the first changed MVA and revokes before the next instruction.
+Non-abortable bus failures leave as host memory faults. Buffered writes complete
+synchronously, preserving order without inventing a device clock or cache timing.
+Ordinary M=0 fixed layouts gain no cache lookup. ICache execution and its
+maintenance remain explicit open work.
 
 ## ARM926 profile
 

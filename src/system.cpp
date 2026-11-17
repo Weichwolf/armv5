@@ -62,6 +62,15 @@ bool selector_valid(RegisterSelection reg) {
     case 10: return selector == 0;
     case 5:
     case 13: return selector < 2;
+    case 7: {
+      const auto operation = selector & 7;
+      switch (selector >> 3) {
+        case 6: return operation <= 2;
+        case 10: return operation >= 1 && operation <= 4;
+        case 14: return operation >= 1 && operation <= 3;
+        default: return false;
+      }
+    }
     case 8: return (selector >> 3) >= 5 && (selector >> 3) <= 7 && (selector & 7) < 2;
     case 9: return selector == 0 || selector == 1 || selector == 8 || selector == 9;
     default: return false;
@@ -112,10 +121,10 @@ void Lowering::write_system(const Instruction &instruction, Values &values, std:
     case 5: value = ir_.CreateAnd(value, c32(immediate_mask)); break;
     case 9:
       if (selector < 8) {
-        refuse(
-            image_.identity, instruction.pc, "CP15 cache lockdown effects are not implemented yet");
+        value = ir_.CreateOr(ir_.CreateAnd(value, c32(15)), c32(System::reset_cache_lockdown));
+      } else {
+        value = tcm_write(instruction, values, value);
       }
-      value = tcm_write(instruction, values, value);
       break;
     case 10: value = ir_.CreateAnd(value, c32(tlb_lockdown_mask)); break;
     case 13:
@@ -136,6 +145,25 @@ Signal Lowering::system_signal(const Instruction &instruction) {
   return mapping ? Signal::mapping_change : Signal::redispatch;
 }
 
+void Lowering::cache_transfer(const Instruction &instruction, Values &values, unsigned selector) {
+  const bool reading = instruction.operation == Operation::system_read;
+  const auto destination = (instruction.word >> 12) & 15;
+  const auto operation = selector & 7;
+  if (reading != (operation == 3)) {
+    refuse(image_.identity, instruction.pc, "unpredictable cache maintenance direction");
+  }
+  auto *result =
+      cache_operation(values, reading ? c32(0) : reg(instruction, values, destination), selector);
+  if (reading) {
+    if (destination == 15) {
+      values.status = ir_.CreateOr(ir_.CreateAnd(values.status, c32(~nzcv_mask)),
+                                   ir_.CreateAnd(result, c32(nzcv_mask)));
+    } else {
+      values.r[destination] = result;
+    }
+  }
+}
+
 void Lowering::system_transfer(const Instruction &instruction, Values &values) {
   const auto word = instruction.word;
   const auto number = (word >> 16) & 15;
@@ -147,6 +175,10 @@ void Lowering::system_transfer(const Instruction &instruction, Values &values) {
   const bool reading = instruction.operation == Operation::system_read;
   const auto offset = register_offset({.number = number, .selector = selector});
   const auto destination = (word >> 12) & 15;
+  if (number == 7) {
+    cache_transfer(instruction, values, selector);
+    return;
+  }
   if (!reading && number == 8) {
     auto *type = llvm::FunctionType::get(
         ir_.getVoidTy(), {ir_.getPtrTy(), ir_.getInt32Ty(), ir_.getInt32Ty()}, false);

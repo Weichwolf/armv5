@@ -435,7 +435,9 @@ void Lowering::signal_guard(const Instruction &instruction,
   ir_.SetInsertPoint(cold);
   // A successful PC load still owes its architectural branch/exception return.
   // Faulting accesses have already left before retirement in slow_access.
-  if (instruction.terminates) {
+  const bool redispatch = instruction.operation == Operation::system_write &&
+                          system_signal(instruction) == Signal::redispatch;
+  if (instruction.terminates && !redispatch) {
     if (!emit_event(instruction, values, old_status, true)) {
       transfer(values, values.r[15], exchanges(instruction), TransferExit::yielded);
     }
@@ -862,7 +864,10 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
   values.cycles = ir_.CreateAdd(values.cycles, c64(instruction.cycles));
   if (instruction.operation == Operation::single || instruction.operation == Operation::extra ||
       instruction.operation == Operation::multiple || instruction.operation == Operation::swap ||
-      (variant_.mapping.control & 1) != 0) {
+      (variant_.mapping.control & 1) != 0 ||
+      ((instruction.operation == Operation::system_read ||
+        instruction.operation == Operation::system_write) &&
+       ((instruction.word >> 16) & 15) == 7)) {
     signal_guard(instruction, values, old_status);
   }
   if (!emit_event(instruction, values, old_status)) { jump(merged, values); }

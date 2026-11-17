@@ -27,7 +27,10 @@ struct Registers {
 
     std::uint32_t data_fault_status = 0, instruction_fault_status = 0, fault_address = 0;
     std::uint32_t context_id = 0;
-    std::uint32_t instruction_cache_lockdown = 0, data_cache_lockdown = 0, tlb_lockdown = 0;
+    static constexpr std::uint32_t reset_cache_lockdown = 0xfff0;
+    std::uint32_t instruction_cache_lockdown = reset_cache_lockdown,
+                  data_cache_lockdown = reset_cache_lockdown;
+    std::uint32_t tlb_lockdown = 0;
     bool operator==(const System &) const = default;
   };
 

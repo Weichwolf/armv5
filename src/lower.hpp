@@ -155,6 +155,8 @@ private:
   void fetch_instruction(Values &values, llvm::Value *address, unsigned width);
   void branch_yield(Values values, llvm::Value *target, bool exchange);
   llvm::Value *callback_address(CallbackBinding::Role role);
+  llvm::Value *cache_operation(Values &values, llvm::Value *operand, unsigned selector);
+  void cache_transfer(const Instruction &instruction, Values &values, unsigned selector);
   llvm::Value *virtual_access(
       Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value);
   void signal_guard(const Instruction &instruction, Values values, llvm::Value *old_status);

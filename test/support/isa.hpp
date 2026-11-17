@@ -21,6 +21,7 @@ void tcm_accesses();
 void external_aborts();
 void mmu_instructions();
 void coprocessor_instructions();
+void cache_instructions();
 
 namespace fixture {
 inline constexpr unsigned condition_shift = 28, immediate_bit = 25, opcode_shift = 21,

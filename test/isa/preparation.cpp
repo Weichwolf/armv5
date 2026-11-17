@@ -475,6 +475,7 @@ int main() {
     memory_control();
     external_aborts();
     mmu_instructions();
+    cache_instructions();
     tcm_accesses();
     preparation_refusals();
     memory_boundaries();
