@@ -726,7 +726,14 @@ bool Lowering::emit_event(const Instruction &instruction,
                           llvm::Value *old_status,
                           bool yielded) {
   if (instruction.operation == Operation::system_write) {
-    exit(values, system_signal(instruction), c32(instruction.pc));
+    const auto signal = system_signal(instruction);
+    if (signal == Signal::wait) {
+      // ARM926 WFI completes on wake, before exception entry, not on sleep entry.
+      values.r[15] = c32(instruction.pc);
+      values.instructions = ir_.CreateSub(values.instructions, c64(1));
+      values.cycles = ir_.CreateSub(values.cycles, c64(instruction.cycles));
+    }
+    exit(values, signal, c32(instruction.pc));
     return true;
   }
   const bool mode_change = instruction.operation == Operation::msr && instruction.terminates;

@@ -790,6 +790,10 @@ struct Core::Impl {
       runtime.address = revocation_address;
     }
     if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::none)) { return; }
+    if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::wait)) {
+      continuation.execution = ExecutionState::stopped;
+      return;
+    }
     if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::yielded)) {
       continuation.execution = ExecutionState::yielded;
       return;
@@ -1094,6 +1098,7 @@ bool Core::interrupt_ready(InterruptRequest request) const {
 void Core::interrupt(InterruptRequest request) {
   impl_->stopped();
   if (!interrupt_ready(request)) { return; }
+  resume_from_stop();
   constexpr std::uint32_t irq_vector = 24;
   constexpr std::uint32_t fiq_vector = 28;
   const bool fast = request.kind == InterruptRequest::Kind::fiq;
@@ -1137,6 +1142,11 @@ void Core::reset(std::uint32_t vector) {
 
 void Core::resume_from_stop() {
   impl_->stopped();
-  detail::refuse(impl_->identity, impl_->runtime.r[15], "architectural stop requires A3/A5");
+  if (impl_->continuation.execution != ExecutionState::stopped) { return; }
+  impl_->runtime.r[15] += 4;
+  ++impl_->runtime.instructions;
+  ++impl_->runtime.cycles;
+  impl_->runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+  impl_->continuation.execution = ExecutionState::ready;
 }
 } // namespace armv5

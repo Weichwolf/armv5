@@ -33,7 +33,8 @@ enum class Signal : std::uint8_t {
   external_abort,
   mmu_callback,
   mmu_prefetch_abort,
-  mmu_change
+  mmu_change,
+  wait
 };
 
 struct DirectRegion {

@@ -9,8 +9,8 @@ checked kernels. The initial A5 increment adds CP15 register state, context-boun
 variants and separate consumer-owned TCM storage spaces; subsequent increments
 add guest mapping writes, active TCM routing and A/L4/V controls. MMU/FCSE
 translation, unified TLB maintenance and functional cache operations now execute.
-Cache contents and timing are not modeled; WFI and profile qualification remain
-open. See
+Cache contents and timing are not modeled. WFI now stops and resumes through
+the owner interface; remaining profile qualification is open. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text
@@ -143,7 +143,10 @@ revoked and leaves cold after retirement; MVA and set/index operations inspect
 only installed dependency ranges. Revalidation follows the existing declared
 transition/install lifecycle, without runtime decoding or hashing. C/I/RR and
 lockdown retain their documented register fields. Callback probes preserve earlier
-yield signals across multiple transfers. WFI remains explicit open work.
+yield signals across multiple transfers. WFI leaves cold with its pre-completion
+SSA state and original PC. Sleep is retained by snapshots. Owner wake completes
+the instruction once, then an eligible interrupt enters its ordinary vector;
+there is no runtime instruction decoding, polling or fabricated wait progress.
 
 ## ARM926 profile
 

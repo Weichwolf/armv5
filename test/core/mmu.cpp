@@ -182,7 +182,7 @@ struct PageService {
   }
 };
 
-enum class YieldForm : std::uint8_t { alu, skipped, branch, load_pc, pop_pc };
+enum class YieldForm : std::uint8_t { alu, skipped, branch, load_pc, pop_pc, wait };
 
 struct FetchTargets {
   std::uint32_t next, target;
@@ -198,6 +198,11 @@ void expected_fetch_yield(armv5::State &expected, YieldForm form, FetchTargets t
   expected.registers.system.tlb_lockdown = one_locked;
   expected.progress = {.instructions = 1, .base_cycles = 1};
   if (form == YieldForm::alu) { expected.registers.r[0] = 3; }
+  if (form == YieldForm::wait) {
+    expected.execution = armv5::ExecutionState::stopped;
+    expected.registers.r[15] = targets.next - 8;
+    expected.progress = {};
+  }
   if (form == YieldForm::branch) {
     expected.registers.r[14] = targets.next;
     expected.banks.supervisor[1] = targets.next;
@@ -221,6 +226,7 @@ void fetch_yield(YieldForm form, bool accept) {
   const bool thumb = form == YieldForm::pop_pc;
   const bool next_thumb = form == YieldForm::load_pc;
   constexpr std::uint32_t conditional_swi = 0x0f000000;
+  constexpr std::uint32_t wait = 0xee070f90;
   constexpr std::uint32_t code_coarse = 0x9011;
   constexpr std::uint32_t guest_data = 0x02004000;
   constexpr std::uint32_t saved_flags = 0x98000000;
@@ -235,6 +241,10 @@ void fetch_yield(YieldForm form, bool accept) {
       break;
     case YieldForm::load_pc: code.word(fixture::transfer(true, false, 15, 0, 4, false)); break;
     case YieldForm::pop_pc: code.half(pop_pc); break;
+    case YieldForm::wait:
+      code.word(wait);
+      code.word(fixture::data(13, false, 1, 0, true, 3));
+      break;
   }
   if (next_thumb) {
     target.half(move_r1);
@@ -263,7 +273,7 @@ void fetch_yield(YieldForm form, bool accept) {
   fixture::put(std::span(machine.data).subspan(0x4000, 4), target.address() | unsigned(next_thumb));
   registers = machine.core->registers();
   registers.cpsr = saved_flags | initial_cpsr | (thumb ? 0x20 : 0);
-  registers.r[thumb ? 13 : 0] = guest_data;
+  registers.r[thumb ? 13 : 0] = form == YieldForm::wait ? 0 : guest_data;
   machine.core->set_registers(registers);
   const auto before = machine.core->state();
   auto expected = before;
@@ -284,14 +294,16 @@ void fetch_yield(YieldForm form, bool accept) {
                    "instruction-walk callback sees exact prefix; yield completes "
                    "predicate/branch/link/interworking and TLB effects");
   const auto saved = machine.core->save();
-  if (accept &&
-      (form == YieldForm::branch || form == YieldForm::load_pc || form == YieldForm::pop_pc)) {
+  if (accept && (form == YieldForm::branch || form == YieldForm::load_pc ||
+                 form == YieldForm::pop_pc || form == YieldForm::wait)) {
     service.descriptor = 0; // A lost snapshot TLB entry would now fault on the device descriptor.
+    if (form == YieldForm::wait) { machine.core->resume_from_stop(); }
     (void)machine.core->run(1);
     const auto after = machine.core->state();
     fixture::require(after.registers.r[1] == 3 && service.calls == 1,
                      "target fetch reuses unified cached entry");
     machine.core->restore(saved);
+    if (form == YieldForm::wait) { machine.core->resume_from_stop(); }
     (void)machine.core->run(1);
     fixture::require(
         machine.core->state() == after && service.calls == 1,
@@ -656,6 +668,8 @@ void mmu_lifecycle() {
     fetch_yield(form, true);
   }
   fetch_yield(YieldForm::alu, false);
+  fetch_yield(YieldForm::wait, true);
+  fetch_yield(YieldForm::wait, false);
   data_walk_callback(true);
   data_walk_callback(false);
   install_does_not_fill();

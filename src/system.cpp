@@ -66,6 +66,7 @@ bool selector_valid(RegisterSelection reg) {
     case 7: {
       const auto operation = selector & 7;
       switch (selector >> 3) {
+        case 0: return operation == 4;
         case 5:
         case 6: return operation <= 2;
         case 7: return operation == 0;
@@ -144,6 +145,7 @@ Signal Lowering::system_signal(const Instruction &instruction) {
   const auto number = (instruction.word >> 16) & 15;
   const auto selector = ((instruction.word & 15) << 3) | ((instruction.word >> 5) & 7);
   if (number == 8) { return Signal::mmu_change; }
+  if (number == 7 && selector == 4) { return Signal::wait; }
   const bool mapping = number == 1 || number == 2 || number == 3 ||
                        (number == 9 && selector >= 8) || (number == 13 && selector == 0);
   return mapping ? Signal::mapping_change : Signal::redispatch;

@@ -189,7 +189,8 @@ once and leaves cold before its successor. The consumer must declare a matching
 transition at that successor and revalidate by installing the appropriate variant.
 An undeclared invalidation reports changed code at the maintenance instruction.
 Snapshots preserve pending transitions; there is no hidden cache content to save
-or rebind. WFI and remaining debug/Jazelle qualification are still open.
+or rebind. WFI behavior is described below; remaining debug/Jazelle qualification
+is still open.
 
 The profile has no external coprocessors in slots 0–13. Their MRC/MCR, CDP,
 LDC/STC and MCRR/MRRC instructions take Undefined before operand transfer, memory
@@ -204,11 +205,33 @@ debug behavior remains pending and is not treated as an absent external device.
 ## Execution and snapshots
 
 `run(n)` returns after exactly n complete instructions, or earlier on a refusal,
-yield or declared variant transfer. `run_until(deadline)` stops at the first
+sleep, yield or declared variant transfer. `run_until(deadline)` stops at the first
 complete boundary at or beyond the absolute nominal base-cycle deadline. A zero
 budget or already reached deadline performs no work. Predicated-false instructions
 retire without effects and cost one base cycle. Bounds never affect translation.
 `RunResult::progress` is per-call; `State::progress` is cumulative.
+
+ARM926 WFI (`MCR p15,0,Rd,c7,c0,4`) waits in `ExecutionState::stopped` at the
+WFI instruction's PC. Per DDI 0198E section 2.3.8, it completes on wake. Sleep
+entry retires no WFI instruction, and repeated runs add no instructions or wait
+cycles. Preceding stores have already completed in program order. A false
+predicate retires normally; User-mode WFI takes Undefined.
+
+`resume_from_stop()` completes a waiting WFI: PC advances four bytes, cumulative
+progress gains one instruction and one nominal base cycle, and execution becomes
+ready. It has no effect in other execution states. An eligible `interrupt()`
+completes WFI before the ordinary three-cycle exception entry; IRQ/FIQ LR is WFI
+PC plus eight, so the normal exception return reaches the successor. A masked
+`interrupt()` remains a no-op. The consumer signals physical wake without vector
+entry, including a masked pending IRQ/FIQ or debug wake, through
+`resume_from_stop()`. The core neither polls interrupt sources nor owns wait-time
+clocks. Completion performed by a wake/interrupt call appears in `State::progress`;
+`RunResult::progress` reports only work completed during its own run call.
+
+Snapshots retain an unfinished wait, including any completed fetch/TLB effects.
+Restore reinstates or clears it, and rebind/install preserves it. Reset clears
+it without retiring WFI. A callback yield during the WFI fetch returns the stopped
+state; completion remains deferred to wake.
 
 Natural blocks use one admission check and keep guest registers in SSA across
 known successors. Only the cold remainder path handles an interior run boundary.
@@ -250,7 +273,7 @@ or callbacks; the core owns no multi-core scheduler or peripheral model.
 
 Io callbacks run synchronously and do not throw. False is an explicit fault.
 Callbacks may inspect the exact prefix and call `request_yield`; a yield completes
-the current instruction before returning, including a loaded PC, interworking
+the current ordinary instruction before returning, including a loaded PC, interworking
 or SPSR/banked-register restoration. Other mutations and execution reentry
 are rejected. An atomic swap uses one swap callback, not separate read/write I/O.
 Callback bindings replace an Io role with a symbol in consumer-linked IR; the
@@ -279,7 +302,7 @@ Abort vectors respectively. ALU S+PC and LDM^ with PC restore SPSR and register
 banks. LDM/STM^ without PC access User banks. User/System SPSR and ^ forms refuse
 preparation. Reset deterministically clears unspecified register/bank values,
 sets CPSR 0xd3 and starts at the supplied aligned vector. Remaining CP15 operations
-and sleep/resume remain A5 work. Thumb exception returns restore T and resume the
+remain A5 work. Thumb exception returns restore T and resume the
 declared Thumb unit.
 
 ## Nominal cycles

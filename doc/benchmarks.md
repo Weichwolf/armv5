@@ -863,3 +863,66 @@ Published `src/` 5,226 (-309), `test/` 8,884 (-849) against `5937412`.
 WFI, remaining CP14/debug/Jazelle behavior, exhaustive profile qualification and
 the outstanding fixed-mapping performance differences remain open. CoreMark and
 final own/generated-code sanitizers follow; macOS ARM64 remains untested.
+
+## WFI sleep and event completion
+
+Prepared privileged WFI now stops at its original PC without completing. DDI
+0198E section 2.3.8 specifies completion on wake. Repeated sleeping runs retire
+nothing and add no nominal wait cycles. Owner wake completes one instruction and
+one base cycle; an eligible IRQ/FIQ completes it before exception entry, with
+LR=WFI+8. Masked interrupt requests retain the sleep; the consumer signals physical
+wake without vector entry through `resume_from_stop()`. The wake API is idempotent
+outside a wait. Completion performed by the event API appears in cumulative
+`State::progress`, while a run result contains only its own completed work.
+
+Sleep, wake, snapshots, rebind/install and reset use the existing state interface.
+No polling, device clocks, native code decoding or additional processor-state
+buffer is introduced. A successful yielding MMU fetch can enter WFI's stopped
+state; its completed TLB effects and unfinished wait survive snapshot replay.
+User WFI takes Undefined; a false predicate retires normally in every mode.
+
+Independent ISA fixtures cover modes, byte orders, fixed/dynamic layouts,
+deadlines, repeated sleep, idempotent wake, snapshot replay and reset. The compact
+core event fixture delivers alternating IRQ/FIQ after deadline runs, checking
+complete state, ordered preceding stores, exact counts, banked status, LR/return,
+masked requests, revalidation and replay. Existing bank/mask/high-vector generators
+remain unchanged. Nine installed SDK consumers pass; the new two-header consumer
+checks unfinished sleep, wake, IRQ entry/return and snapshots. This increment uses
+contract v8, fast-forwarded from the shared contract-only commit.
+
+Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release, warm median-of-three user hardware
+counters (`perf_event_paranoid=2`). All six complete outputs/hashes, 34,042 K6 IRQs
+and 256-cycle bounds pass. Native guest text sizes are unchanged from the
+functional-cache increment. K1–K5 retain rounded instruction counts. K6 moves
+from 12.733727 to 12.735258 I/GI, consistent with about four additional host
+instructions per delivered IRQ for wake eligibility; no tuning was performed.
+K5 was remeasured after an outlying portable-reference time; its latest checked
+warm measurement is reported below.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.923 | 2.148 | 0.536783 | 1862.950 | 6.776x | 0.117981 | 8,662 | 309.357 |
+| K2 | 6.202 | 1.658 | 0.406123 | 2462.311 | 2.974x | 0.265676 | 18,503 | 268.159 |
+| K3 | 5.387 | 1.471 | 0.367929 | 2717.919 | 0.960x | 0.270817 | 17,143 | 272.111 |
+| K4 | 12.839 | 3.218 | 0.791086 | 1264.085 | 12.925x | 0.767451 | 25,206 | 442.211 |
+| K5 | 7.607 | 2.123 | 0.519282 | 1925.735 | 39.918x | 0.071049 | 5,528 | 502.545 |
+| K6 | 12.735 | 3.916 | 0.973294 | 1027.439 | 12.408x | 0.124807 | 9,262 | 308.733 |
+
+Guest instruction/base-cycle totals and 100% native share are unchanged. The
+previous report retains the pre-A5 comparison; the noted K4/K6 differences remain
+reported without further tuning. Compiler identity:
+
+```text
+armv5-93ccf9ca424c5f17c61a42f3e4d0927b77ebb7892a6824aa9ed1f428c1155cd8-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, working-tree suites and source-only export, configured
+tidy/format and nine installed SDK consumers. After reducing duplicate WFI bank/
+vector fixture setup, core/bench were rerun and the exact final export passes all
+three suites. All 60 build inputs and contract v8 match the export byte-for-byte;
+the installed SDK archive matches the final build. Published `src/` 5,246 (+20),
+`test/` 9,116 (+232) against the contract-v8 baseline `1bc0bfa`.
+
+A5 remains open for the bounded trivial-Jazelle behavior, disabled-debug profile
+and final coverage table. CoreMark and own/generated-code sanitizers follow A5;
+macOS ARM64 remains untested.

@@ -139,6 +139,78 @@ void flags_and_predication() {
                    "MRC R15 updates NZCV only and later predicates observe it");
 }
 
+void wait_for_interrupt(bool big, bool fixed) {
+  constexpr std::uint32_t wait = 0xee070f90;
+  constexpr std::uint32_t skipped_wait = 0x0e070f90;
+  constexpr std::uint32_t flags = 0x98000000;
+  constexpr std::uint32_t next_pc = 0x1008;
+  constexpr std::array modes{fixture::user_mode,
+                             fixture::fiq_mode,
+                             fixture::irq_mode,
+                             fixture::supervisor_mode,
+                             fixture::abort_mode,
+                             fixture::undefined_mode,
+                             fixture::system_mode};
+  fixture::Program code(0x1000, big);
+  code.word(skipped_wait);
+  code.word(wait);
+  code.word(fixture::data(13, false, 1, 0, true, 7));
+  armv5::Registers::System::Mapping mapping;
+  mapping.control |= big ? 0x80 : 0;
+  fixture::Modes machine(
+      {{.program = code, .modes = {modes.begin(), modes.end()}}}, {}, fixed, 0x10000, {}, mapping);
+  const auto initial = machine.core->save();
+  for (const auto mode : modes) {
+    machine.core->restore(initial);
+    auto registers = machine.core->registers();
+    registers.cpsr = flags | mode;
+    machine.core->set_registers(registers);
+    auto prefix = machine.core->state();
+    prefix.registers.r[15] += 4;
+    prefix.progress = {.instructions = 1, .base_cycles = 1};
+    fixture::require(machine.core->run(1).execution == armv5::ExecutionState::ready &&
+                         machine.core->state() == prefix,
+                     "a false WFI predicate retires normally in every mode, including User");
+    if (mode == fixture::user_mode) { continue; } // Taken User WFI is checked by undefined_access.
+    auto asleep = prefix;
+    asleep.execution = armv5::ExecutionState::stopped;
+    fixture::require(machine.core->run_until(2).progress == armv5::Progress{} &&
+                         machine.core->state() == asleep,
+                     "WFI sleeps at its own PC without completing before wake");
+    const auto saved = machine.core->save();
+    fixture::require(machine.core->run(16).progress == armv5::Progress{} &&
+                         machine.core->run_until(16).progress == armv5::Progress{} &&
+                         machine.core->state() == asleep,
+                     "repeated sleeping runs add no instructions or wait cycles");
+    auto awake = prefix;
+    awake.registers.r[15] = next_pc;
+    awake.progress = {.instructions = 2, .base_cycles = 2};
+    machine.core->resume_from_stop();
+    fixture::require(machine.core->state() == awake, "wake completes WFI exactly once");
+    machine.core->resume_from_stop();
+    fixture::require(machine.core->run_until(2).progress == armv5::Progress{} &&
+                         machine.core->state() == awake,
+                     "wake is idempotent and the reached deadline admits no successor");
+    (void)machine.core->run(1);
+    auto after = awake;
+    after.registers.r[1] = 7;
+    after.registers.r[15] = code.pc();
+    after.progress = {.instructions = 3, .base_cycles = 3};
+    fixture::require(machine.core->state() == after, "wake continues at the prepared successor");
+    machine.core->restore(saved);
+    fixture::require(machine.core->state() == asleep, "snapshot reinstates an unfinished WFI");
+    machine.core->resume_from_stop();
+    (void)machine.core->run(1);
+    fixture::require(machine.core->state() == after, "sleep/wake snapshot replay is exact");
+    machine.core->restore(saved);
+  }
+  machine.core->reset(code.address());
+  fixture::require(machine.core->state().execution == armv5::ExecutionState::ready &&
+                       machine.core->state().progress == armv5::Progress{} &&
+                       machine.core->registers().r[15] == code.address(),
+                   "reset clears WFI without completing or preserving the wait");
+}
+
 struct UndefinedCase {
   std::uint32_t instruction, mode;
 };
@@ -180,6 +252,11 @@ void system_registers() {
   identification(true);
   writable_state();
   flags_and_predication();
+  constexpr std::uint32_t wait = 0xee070f90;
+  undefined_access({.instruction = wait, .mode = fixture::user_mode});
+  for (const bool big : {false, true}) {
+    for (const bool fixed : {false, true}) { wait_for_interrupt(big, fixed); }
+  }
   undefined_access(
       {.instruction = transfer(true, 0, {.number = 0, .selector = 0}), .mode = fixture::user_mode});
   undefined_access({.instruction = transfer(false, 0, {.number = 6, .selector = 0}),
