@@ -2,6 +2,7 @@
 #include "support/mmu.hpp"
 
 #include "armv5/core.hpp"
+#include "armv5/memory.hpp"
 #include "support/isa.hpp"
 #include "support/modes.hpp"
 
@@ -10,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 namespace {
 constexpr std::uint32_t move_zero_three_word = 0xe3a00003;
@@ -164,6 +166,7 @@ struct PageService {
   std::uint32_t requested = 0;
   unsigned calls = 0;
   bool accept = true;
+  unsigned yield_call = 0;
 
   static bool
   read(void *owner, std::uint32_t address, unsigned width, std::uint32_t &out) noexcept {
@@ -173,7 +176,7 @@ struct PageService {
     self.requested = address;
     ++self.calls;
     if (!self.accept) { return false; }
-    self.cpu->request_yield();
+    if (self.yield_call == 0 || self.calls == self.yield_call) { self.cpu->request_yield(); }
     out = self.descriptor;
     return true;
   }
@@ -345,6 +348,47 @@ void data_walk_callback(bool accept) {
                        machine.data == ram,
                    "store translation uses the read callback, exposes exact prefix, and completes "
                    "accepted yield atomically");
+}
+
+void multiple_callback_yield() {
+  constexpr std::uint32_t load_pair = 0xe8b00006;
+  constexpr std::uint32_t sentinel = 0x11223344;
+  PageService service;
+  service.descriptor = sentinel;
+  service.yield_call = 1;
+  fixture::Program code;
+  code.word(load_pair);
+  code.word(move_zero_three_word);
+  fixture::MmuMachine machine({{.program = code, .modes = {fixture::supervisor_mode}}},
+                              {},
+                              false,
+                              {.owner = &service, .read = &PageService::read});
+  std::erase_if(machine.regions, [](const armv5::Memory::Region &region) {
+    return region.address == fixture::MmuMachine::data_physical;
+  });
+  machine.core->set_memory({.regions = machine.regions, .generation = 1});
+  machine.prepare(false);
+  service.cpu = machine.core.get();
+  auto registers = machine.core->registers();
+  registers.r[0] = fixture::MmuMachine::data_virtual;
+  machine.core->set_registers(registers);
+  auto expected = machine.core->state();
+  expected.registers.r[0] += 8;
+  expected.registers.r[1] = sentinel;
+  expected.registers.r[2] = sentinel;
+  expected.registers.r[15] += 4;
+  expected.progress = {.instructions = 1, .base_cycles = 2};
+  expected.execution = armv5::ExecutionState::yielded;
+  const auto result = machine.core->run(16);
+  fixture::require(machine.core->state() == expected && service.calls == 2 &&
+                       result.progress == expected.progress,
+                   "an LDM's first callback yield survives the second callback probe/retry");
+  const auto saved = machine.core->save();
+  (void)machine.core->run(1);
+  const auto after = machine.core->state();
+  machine.core->restore(saved);
+  (void)machine.core->run(1);
+  fixture::require(machine.core->state() == after, "callback-yield snapshot resumes at successor");
 }
 
 void subpages(bool large, bool fine, bool big) {
@@ -592,6 +636,7 @@ void code_remap(bool same_bytes) {
 } // namespace
 
 void mmu_lifecycle() {
+  multiple_callback_yield();
   for (const bool partial : {false, true}) {
     for (const bool declared : {false, true}) { code_alias(partial, declared); }
   }

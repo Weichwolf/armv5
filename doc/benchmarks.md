@@ -798,3 +798,68 @@ destination, original FAR, guest MRC readback and snapshot replay. Published
 A5 remains open for ICache execution/maintenance, WFI, remaining debug/CP14/
 Jazelle behavior and exhaustive profile qualification. CoreMark and final
 own/generated-code sanitizers follow; macOS ARM64 remains untested.
+
+## Functional cache controls and code invalidation
+
+The DCache-content implementation described in earlier sections has been
+removed. `src/cache.*` and cache bytes, tags, dirty halves, replacement and
+write-buffer state no longer enter execution, snapshots or rebinding. CP15
+C/I/RR and c9 register behavior remain; c9 retains its corrected required-one
+reset fields. Data clean/invalidate/drain operations leave consumer storage
+unchanged, test-clean reports clean, and instruction prefetch retains no content.
+ICache whole/combined, MVA and Set/Way invalidation revoke affected prepared
+bindings through a cold exit and declared revalidation. MVA operands are already
+modified; set/index coverage follows the reported 16KB, four-way ICache geometry.
+
+Reserved TTBR/PID refusal, callback-yield preservation and SWP semantics remain.
+A new uncached LDM callback fixture keeps the first yield across a second probe.
+Functional cache fixtures replace the withdrawn content-policy tests. They check
+register fields, direct consumer storage, no-content maintenance, flags, modes,
+byte orders, layouts, page C/B attributes, affected code ranges, FCSE, predicates,
+exact retirement, missing/declared transitions and snapshot replay.
+
+Removal alone retained the earlier external-abort regression (K1 8.289 and
+K5 8.007 I/GI). Sharing the cold DFSR/FAR stores in one private LLVM helper
+restores K1/K5 to the requested range while retaining all independent abort and
+ordering fixtures. Original guest instructions still lower directly to SSA;
+there is no additional executor or runtime decoding. Generated native text grows
+for some kernels as LLVM allocates the surrounding cold exits differently.
+
+Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release and warm median-of-three user
+hardware-counter method (`perf_event_paranoid=2`). The final timing run followed
+completion of the parallel qualification jobs. All complete outputs/hashes,
+34,042 K6 IRQs and 256-cycle bounds pass.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.923 | 2.148 | 0.528496 | 1892.163 | 6.735x | 0.117595 | 8,662 | 309.357 |
+| K2 | 6.202 | 1.659 | 0.407588 | 2453.457 | 3.021x | 0.266303 | 18,503 | 268.159 |
+| K3 | 5.387 | 1.428 | 0.349307 | 2862.814 | 0.926x | 0.270396 | 17,143 | 272.111 |
+| K4 | 12.839 | 3.215 | 0.786573 | 1271.337 | 12.804x | 0.757069 | 25,206 | 442.211 |
+| K5 | 7.607 | 2.126 | 0.533119 | 1875.754 | 39.986x | 0.070822 | 5,528 | 502.545 |
+| K6 | 12.734 | 3.980 | 0.991134 | 1008.945 | 12.482x | 0.123443 | 9,262 | 308.733 |
+
+Against pre-A5 `c112bcf`, K1 is 7.923 versus 7.941 I/GI and K5 is 7.607 versus
+7.808. K3 is 5.387 versus 5.408. K2 (6.202 versus 6.167), K4 (12.839 versus
+12.321) and K6 (12.734 versus 12.378) remain higher; this is not a blanket
+no-regression result for A5. No K4 call/ABI tuning was performed. Guest
+instruction/base-cycle totals and 100% native guest share are unchanged.
+Compiler identity:
+
+```text
+armv5-b2406f50c9a1ccfe6127b7f9db5d262754890bb8112fb116e80c31d23c38fdd8-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites in the working tree and exact
+source-only export, configured tidy/format and eight installed SDK consumers.
+All 59 remaining build/source/test inputs match the tested export byte-for-byte;
+the installed SDK archive matches the final build. The revised two-header cache
+consumer verifies immediate storage effects, clean status, code invalidation,
+revalidation and pending-transition snapshots. Existing ISA expectations outside
+the withdrawn cache-content model remain intact, including SWP external-abort
+write ordering and MRC R15 nominal timing from DDI 0165B table 8-2.
+Published `src/` 5,226 (-309), `test/` 8,884 (-849) against `5937412`.
+
+WFI, remaining CP14/debug/Jazelle behavior, exhaustive profile qualification and
+the outstanding fixed-mapping performance differences remain open. CoreMark and
+final own/generated-code sanitizers follow; macOS ARM64 remains untested.

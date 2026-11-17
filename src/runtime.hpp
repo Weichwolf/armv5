@@ -58,7 +58,6 @@ struct Runtime {
   enum class Width : std::uint8_t { byte = 1, half = 2, word = 4 };
   enum class DataCallback : std::uintptr_t {};
   enum class PageCallback : std::uintptr_t {};
-  enum class WriteCallback : std::uintptr_t {};
   enum class Privilege : std::uint8_t { user, privileged };
   enum class Callbacks : std::uint8_t { probe, invoke };
   using VirtualAccess = std::uint64_t (*)(Runtime *,
@@ -68,7 +67,6 @@ struct Runtime {
                                           std::uint32_t,
                                           DataCallback,
                                           PageCallback,
-                                          WriteCallback,
                                           std::uint32_t,
                                           unsigned,
                                           Privilege,
@@ -79,9 +77,12 @@ struct Runtime {
   Fetch fetch = nullptr;
   using Invalidate = void (*)(Runtime *, std::uint32_t, unsigned) noexcept;
   Invalidate invalidate = nullptr;
-  using CacheOperation = std::uint64_t (*)(
-      Runtime *, std::uint32_t, unsigned, PageCallback, WriteCallback, Callbacks) noexcept;
-  CacheOperation cache_operation = nullptr;
+  enum class CodeInvalidation : std::uint8_t { all, line, set };
+  using InvalidateCode = void (*)(Runtime *,
+                                  std::uint32_t,
+                                  CodeInvalidation,
+                                  std::uint32_t) noexcept;
+  InvalidateCode invalidate_code = nullptr;
 };
 
 static_assert(std::is_standard_layout_v<Runtime>);

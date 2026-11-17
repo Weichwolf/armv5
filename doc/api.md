@@ -55,8 +55,8 @@ instruction/data TCM region registers. Fault-status/address, context ID and
 lockdown registers are separate fields. They are included in state inspection
 and snapshots. The current profile reports r0p5 ID `0x41069265`, 16KB instruction
 and 8KB data caches, four ways and 32-byte lines. MMU/FCSE translation and TLB
-operations and DCache execution are described below. ICache execution remains
-pending; reporting its geometry does not enable it.
+operations and functional cache controls are described below. Cache geometry
+defines register fields and maintenance ranges; cache contents are not modeled.
 
 `CodeVariant::mapping` optionally declares the CP15 assumptions for that coherent
 variant. Omission inherits the reset mapping and `CompileOptions::big_endian`.
@@ -166,58 +166,30 @@ binding even if its bytes match; an undeclared translated alias still refuses.
 TLB maintenance under M=1 revokes through a declared transition, which may target
 the same variant. Variants still require their exact declared CP15 context.
 
-The DCache is enabled by C when M is also set. With M clear, data accesses bypass
-the DCache even if C is set. Page C/B select noncacheable/nonbufferable,
-noncacheable/bufferable, write-through or write-back. ITCM/DTCM selection precedes
-the cache lookup. Protection checks precede a cache hit. A read miss fills a
-32-byte line, critical word first with wrap within that line; a write miss writes
-externally without allocation. Write-through hits update both views; write-back
-hits update cached bytes and the affected 16-byte dirty half. SWP/SWPB use one
-owner cache transaction for cacheable storage. Uncached I/O still uses the atomic
-swap role.
+Cache controls have a functional translation model. CP15 C/I/RR and the c9
+lockdown fields remain readable/writable, but the core retains no cache bytes,
+tags, dirty state, replacement or write-buffer contents. All data accesses use
+consumer storage after ordinary MMU permission and TCM selection. Cache timing
+and stale-cache behavior are outside this model. Both c9 cache lockdown registers
+reset to `0xfff0`; bits 15:4 read as ones. Guest read-modify-write sequences
+preserve those required-one fields.
 
-The 8KB DCache uses four ways and MVA tags. Each line retains its original physical
-tag for writeback, so editing a page table and invalidating the TLB does not
-change an existing cached line or its writeback destination. Cache maintenance
-MVA operands are already modified addresses; FCSE is not applied again.
-Replacement uses a deterministic pseudo-random stream or a per-set round-robin
-cursor selected by RR. The c9 lockdown L bits exclude ways from new allocations;
-if all four are set, way 3 remains the allocation target. Both lockdown registers
-reset to `0xfff0`: bits 15:4 read as ones and all ways start unlocked. Guest
-read-modify-write sequences preserve those required-one fields. Snapshot restore
-includes cached bytes, tags, dirty halves and replacement continuation. Rebind
-and reinstall preserve that processor state; reset invalidates it.
+Data-cache invalidate, clean, clean-and-invalidate and write-buffer drain are
+accepted without memory-content effects. Test-clean and test-clean-invalidate
+return bit 30 set (clean); other result bits are zero. MRC R15 updates NZCV only.
+Instruction prefetch is accepted without a stored cache fill. These operations
+do not touch an address merely because it appears in their operand.
 
-Supported c7 DCache operations are invalidate-all, invalidate/clean/clean-and-
-invalidate by MVA or Set/Way, test-and-clean, test-clean-and-invalidate and drain
-write buffer. Test operations return bit 30 clear while cleaning one dirty line;
-a later test finds the cache clean and sets bit 30. Other result bits are zero in
-this model. Test-clean-and-invalidate invalidates the cache on that final clean
-test. MRC R15 updates NZCV without a PC transfer. False predicates suppress all
-cache and lockdown effects.
-
-External buffered stores and cache writebacks complete synchronously in program
-order; no pending write is forwarded. Drain is a memory-ordering boundary and
-does not clean dirty cache lines. This models functional ordering without bus
-queues or cache-miss timing. Cache fills/writebacks and buffered writes cannot
-take an ARM926 external abort. Missing/denied physical storage and refusing I/O
-therefore produce an explicit host memory fault, preserving FSR/FAR. Cache line
-fills require all eight physical words to be supplied. Real callbacks observe
-the exact SSA prefix; accepted yield completes the current instruction, including
-all transfers, writeback and flag effects. Partial failed cache clean writes stay
-visible without fabricating instruction retirement.
-
-Dirty DCache code bytes reach the instruction view when written back. A clean or
-eviction that changes bound instruction storage revokes the binding before a
-successor executes. The consumer installs the declared destination variant; a
-missing transition reports the changed MVA. A partial writeback host fault keeps
-its physical diagnostic. CPU snapshots restore hidden cache state and pending
-code transfers without changing consumer storage.
-
-Installation rejects nonzero reserved TTBR/PID bits in declared contexts before
-native memory access. ICache execution/maintenance, WFI, debug IFSR qualification
-and remaining CP15 operations are pending; I-enabled configurations cannot yet be
-installed. See `isa-coverage.md`.
+Instruction-cache invalidation declares a code change, including when I is clear.
+Whole-cache and combined I/D invalidation revoke the installed binding. MVA
+invalidation revokes it when the selected 32-byte line overlaps prepared code;
+the operand is already modified and FCSE is not applied twice. Set/Way invalidation
+conservatively includes every way of the selected index. The operation retires
+once and leaves cold before its successor. The consumer must declare a matching
+transition at that successor and revalidate by installing the appropriate variant.
+An undeclared invalidation reports changed code at the maintenance instruction.
+Snapshots preserve pending transitions; there is no hidden cache content to save
+or rebind. WFI and remaining debug/Jazelle qualification are still open.
 
 The profile has no external coprocessors in slots 0–13. Their MRC/MCR, CDP,
 LDC/STC and MCRR/MRRC instructions take Undefined before operand transfer, memory
@@ -318,7 +290,8 @@ clock factors. ALU/immediate-shift and ordinary single transfers cost one;
 register-controlled ALU shifts cost two; branches cost three; ALU writes to PC
 cost three; LDR PC costs five; doubleword transfers and SWP cost two; multiple
 transfers cost max(n,2), or n+4 when loading PC. MRS costs two, flags-only MSR and
-PLD cost one. MSR selecting non-flag fields costs three; MUL/MLA cost two,
+PLD cost one. MRC/MCR cost one, except MRC to R15 costs four (table 8-2).
+MSR selecting non-flag fields costs three; MUL/MLA cost two,
 or four when setting flags. Long multiply/accumulate costs three, or five with
 flags. Halfword/word DSP multiply costs one, except SMLALxy costs two; CLZ and
 Q arithmetic cost one. Thumb operations use the same nominal operation costs;

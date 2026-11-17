@@ -12,7 +12,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <llvm/IR/Attributes.h>
+#include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/Alignment.h>
@@ -91,7 +94,6 @@ llvm::Value *Lowering::virtual_access(
       value,
       callback_address(role),
       callback_address(CallbackBinding::Role::read),
-      callback_address(CallbackBinding::Role::write),
       access_first_,
       c32(access_count_),
       ir_.getInt8(static_cast<std::uint8_t>(mode_ != user_mode && !user_transfer)),
@@ -103,7 +105,7 @@ llvm::Value *Lowering::virtual_access(
   auto *callee = load(ir_.getPtrTy(), offsetof(Runtime, virtual_access));
   auto invoke = [&]() {
     auto *call = ir_.CreateCall(type, callee, arguments);
-    for (const auto index : {2U, 10U, 11U}) { call->addParamAttr(index, llvm::Attribute::ZExt); }
+    for (const auto index : {2U, 9U, 10U}) { call->addParamAttr(index, llvm::Attribute::ZExt); }
     return call;
   };
   auto *probe = invoke();
@@ -127,56 +129,6 @@ llvm::Value *Lowering::virtual_access(
   result->addIncoming(slow, retried);
   auto *accepted = block("virtual.accepted");
   auto *failed = block("virtual.failed");
-  cold_branch(ir_.CreateICmpEQ(ir_.CreateLShr(result, c64(32)), c64(0)), accepted, failed);
-  ir_.SetInsertPoint(failed);
-  finish_exit(values,
-              load(ir_.getInt32Ty(), offsetof(Runtime, signal)),
-              load(ir_.getInt32Ty(), offsetof(Runtime, address)));
-  ir_.SetInsertPoint(accepted);
-  auto *signal = load(ir_.getInt32Ty(), offsetof(Runtime, signal));
-  pending_signal_ = ir_.CreateSelect(ir_.CreateICmpEQ(signal, c32(0)), previous_signal, signal);
-  return ir_.CreateTrunc(result, ir_.getInt32Ty());
-}
-
-llvm::Value *Lowering::cache_operation(Values &values, llvm::Value *operand, unsigned selector) {
-  auto *previous_signal = pending_signal_;
-  auto *type = llvm::FunctionType::get(ir_.getInt64Ty(),
-                                       {ir_.getPtrTy(),
-                                        ir_.getInt32Ty(),
-                                        ir_.getInt32Ty(),
-                                        ir_.getInt64Ty(),
-                                        ir_.getInt64Ty(),
-                                        ir_.getInt8Ty()},
-                                       false);
-  auto *callee = load(ir_.getPtrTy(), offsetof(Runtime, cache_operation));
-  auto *read = callback_address(CallbackBinding::Role::read);
-  auto *write = callback_address(CallbackBinding::Role::write);
-  auto invoke = [&](unsigned callbacks) {
-    auto *call = ir_.CreateCall(
-        type, callee, {runtime_, operand, c32(selector), read, write, ir_.getInt8(callbacks)});
-    call->addParamAttr(5, llvm::Attribute::ZExt);
-    return call;
-  };
-  auto *probe = invoke(0);
-  auto *source = ir_.GetInsertBlock();
-  auto *retry = block("cache.io");
-  auto *completed = block("cache.result");
-  cold_branch(ir_.CreateICmpNE(load(ir_.getInt32Ty(), offsetof(Runtime, signal)),
-                               c32(static_cast<unsigned>(Signal::mmu_callback))),
-              completed,
-              retry);
-  ir_.SetInsertPoint(retry);
-  materialize(values);
-  store(c32(0), offsetof(Runtime, signal));
-  auto *slow = invoke(1);
-  auto *retried = ir_.GetInsertBlock();
-  ir_.CreateBr(completed);
-  ir_.SetInsertPoint(completed);
-  auto *result = ir_.CreatePHI(ir_.getInt64Ty(), 2);
-  result->addIncoming(probe, source);
-  result->addIncoming(slow, retried);
-  auto *accepted = block("cache.accepted");
-  auto *failed = block("cache.failed");
   cold_branch(ir_.CreateICmpEQ(ir_.CreateLShr(result, c64(32)), c64(0)), accepted, failed);
   ir_.SetInsertPoint(failed);
   finish_exit(values,
@@ -343,8 +295,29 @@ void Lowering::external_abort(llvm::Value *address) {
     far = ir_.CreateSelect(
         ir_.CreateICmpEQ(ir_.CreateAnd(address, c32(burst_mask)), first_page), first_end, last);
   }
-  store(c32(8), offsetof(Runtime, system) + offsetof(Registers::System, data_fault_status));
-  store(far, offsetof(Runtime, system) + offsetof(Registers::System, fault_address));
+  auto *helper = module_.getFunction("armv5.external.abort");
+  if (helper == nullptr) {
+    auto *type =
+        llvm::FunctionType::get(ir_.getVoidTy(), {ir_.getPtrTy(), ir_.getInt32Ty()}, false);
+    helper = llvm::Function::Create(
+        type, llvm::GlobalValue::InternalLinkage, "armv5.external.abort", module_);
+    helper->addFnAttr(llvm::Attribute::NoInline);
+    helper->addFnAttr(llvm::Attribute::Cold);
+    helper->addFnAttr(llvm::Attribute::NoUnwind);
+    llvm::IRBuilder<> body(llvm::BasicBlock::Create(context_, "entry", helper));
+    auto *status = body.CreateGEP(
+        body.getInt8Ty(),
+        helper->getArg(0),
+        c64(offsetof(Runtime, system) + offsetof(Registers::System, data_fault_status)));
+    auto *fault_address =
+        body.CreateGEP(body.getInt8Ty(),
+                       helper->getArg(0),
+                       c64(offsetof(Runtime, system) + offsetof(Registers::System, fault_address)));
+    body.CreateStore(c32(8), status);
+    body.CreateStore(helper->getArg(1), fault_address);
+    body.CreateRetVoid();
+  }
+  ir_.CreateCall(helper, {runtime_, far});
 }
 
 bool Lowering::load_exchange() const {

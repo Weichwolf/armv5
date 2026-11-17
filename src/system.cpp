@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <llvm/IR/Attributes.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Value.h>
 #include <optional>
@@ -65,7 +66,10 @@ bool selector_valid(RegisterSelection reg) {
     case 7: {
       const auto operation = selector & 7;
       switch (selector >> 3) {
+        case 5:
         case 6: return operation <= 2;
+        case 7: return operation == 0;
+        case 13: return operation == 1;
         case 10: return operation >= 1 && operation <= 4;
         case 14: return operation >= 1 && operation <= 3;
         default: return false;
@@ -149,11 +153,25 @@ void Lowering::cache_transfer(const Instruction &instruction, Values &values, un
   const bool reading = instruction.operation == Operation::system_read;
   const auto destination = (instruction.word >> 12) & 15;
   const auto operation = selector & 7;
-  if (reading != (operation == 3)) {
+  const auto group = selector >> 3;
+  if (reading != ((group == 10 || group == 14) && operation == 3)) {
     refuse(image_.identity, instruction.pc, "unpredictable cache maintenance direction");
   }
-  auto *result =
-      cache_operation(values, reading ? c32(0) : reg(instruction, values, destination), selector);
+  if (!reading && (group == 5 || group == 7)) {
+    auto *type = llvm::FunctionType::get(
+        ir_.getVoidTy(),
+        {ir_.getPtrTy(), ir_.getInt32Ty(), ir_.getInt8Ty(), ir_.getInt32Ty()},
+        false);
+    auto *call = ir_.CreateCall(type,
+                                load(ir_.getPtrTy(), offsetof(Runtime, invalidate_code)),
+                                {runtime_,
+                                 reg(instruction, values, destination),
+                                 ir_.getInt8(operation),
+                                 c32(instruction.pc)});
+    call->addParamAttr(2, llvm::Attribute::ZExt);
+    pending_signal_ = load(ir_.getInt32Ty(), offsetof(Runtime, signal));
+  }
+  auto *result = c32(status_z);
   if (reading) {
     if (destination == 15) {
       values.status = ir_.CreateOr(ir_.CreateAnd(values.status, c32(~nzcv_mask)),

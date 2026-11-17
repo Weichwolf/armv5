@@ -2,7 +2,6 @@
 #include "armv5/core.hpp"
 
 #include "armv5/memory.hpp"
-#include "cache.hpp"
 #include "identity.hpp"
 #include "image.hpp"
 #include "mmu.hpp"
@@ -58,7 +57,6 @@ struct Snapshot::Impl {
   bool external_entry;
   std::string pending_image;
   detail::Mmu mmu;
-  detail::DataCache data_cache;
 };
 
 Snapshot::Snapshot(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -110,7 +108,6 @@ struct Core::Impl {
   std::vector<HostRange> code_ranges;
   std::string identity, pending_image;
   detail::Mmu mmu;
-  detail::DataCache data_cache;
 
   struct CodeBinding {
     std::uint32_t address, physical, size;
@@ -124,7 +121,7 @@ struct Core::Impl {
     runtime.virtual_access = &virtual_access;
     runtime.fetch = &fetch;
     runtime.invalidate = &invalidate;
-    runtime.cache_operation = &cache_operation;
+    runtime.invalidate_code = &invalidate_code;
     rebind(memory);
   }
 
@@ -434,11 +431,9 @@ struct Core::Impl {
     return access_failure;
   }
 
-  std::uint64_t transaction(CallbackAccess request, bool bus) {
+  std::uint64_t transaction(CallbackAccess request) {
     const auto [address, width, operation, value, replacement] = request;
-    const auto storage =
-        bus ? StorageAddress{.space = Memory::Space::bus, .relative = address, .available = 0}
-            : storage_address(address, false);
+    const auto storage = storage_address(address, false);
     const auto *region = this->region(storage.relative, width, storage.space);
     if (region == nullptr) {
       return callback({.address = address,
@@ -452,7 +447,7 @@ struct Core::Impl {
       // attempts the write. Keep its code-alias effects before latching Abort.
       if (operation == 2 && region->writable) {
         request.operation = 1;
-        (void)transaction(request, bus);
+        (void)transaction(request);
       }
       runtime.signal = static_cast<std::uint32_t>(detail::Signal::external_abort);
       runtime.address = address;
@@ -487,8 +482,7 @@ struct Core::Impl {
                               .width = width,
                               .operation = operation,
                               .value = value,
-                              .replacement = replacement},
-                             false);
+                              .replacement = replacement});
   }
 
   struct TableReader {
@@ -550,63 +544,31 @@ struct Core::Impl {
     return true;
   }
 
-  struct CacheBus {
-    Impl *owner;
-    std::uintptr_t read, write;
-    detail::Runtime::Callbacks callbacks;
-
-    static bool access(void *context, detail::DataCache::BusRequest request, std::uint32_t &value) {
-      const auto &bus = *static_cast<CacheBus *>(context);
-      auto &owner = *bus.owner;
-      const auto replacement = request.writing ? bus.write : bus.read;
-      const auto *mapped = owner.region(request.address, request.width);
-      const bool callback = replacement != 0 || (request.writing ? owner.io.write != nullptr
-                                                                 : owner.io.read != nullptr);
-      if (mapped == nullptr && callback && bus.callbacks == detail::Runtime::Callbacks::probe) {
-        owner.runtime.signal = static_cast<std::uint32_t>(detail::Signal::mmu_callback);
-        return false;
-      }
-      const bool was_revoked = owner.revoked;
-      const auto result = owner.transaction({.address = request.address,
-                                             .width = request.width,
-                                             .operation = request.writing ? 1U : 0U,
-                                             .value = request.value,
-                                             .replacement = replacement},
-                                            true);
-      if ((result & access_failure) != 0) {
-        // ARM926 cache fills/writebacks and buffered stores cannot externally abort.
-        // Missing bus storage is an explicit consumer memory fault instead.
-        owner.runtime.signal = static_cast<std::uint32_t>(detail::Signal::memory);
-        return false;
-      }
-      if (!was_revoked && owner.revoked) { owner.revocation_address = request.mva; }
-      value = static_cast<std::uint32_t>(result);
-      return true;
-    }
-  };
-
-  static std::uint64_t cache_operation(detail::Runtime *runtime,
-                                       std::uint32_t operand,
-                                       unsigned selector,
-                                       detail::Runtime::PageCallback read_callback,
-                                       detail::Runtime::WriteCallback write_callback,
-                                       detail::Runtime::Callbacks callbacks) noexcept {
+  static void invalidate_code(detail::Runtime *runtime,
+                              std::uint32_t operand,
+                              detail::Runtime::CodeInvalidation operation,
+                              std::uint32_t pc) noexcept {
     auto &owner = *static_cast<Impl *>(runtime->owner);
-    CacheBus bus{.owner = &owner,
-                 .read = static_cast<std::uintptr_t>(read_callback),
-                 .write = static_cast<std::uintptr_t>(write_callback),
-                 .callbacks = callbacks};
-    std::uint32_t result = 0;
-    if (!owner.data_cache.maintain({.selector = selector,
-                                    .operand = operand,
-                                    .big = (runtime->system.mapping.control & 0x80) != 0},
-                                   &CacheBus::access,
-                                   &bus,
-                                   result)) {
-      return access_failure;
-    }
-    if (owner.revoked) { runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed); }
-    return result;
+    constexpr std::uint32_t line_mask = 0xffffffe0;
+    constexpr std::uint32_t set_mask = 0xfe0; // c0: 16KB ICache, four ways, 32-byte lines.
+    const auto line = operand & line_mask;
+    const bool affected =
+        operation == detail::Runtime::CodeInvalidation::all ||
+        std::ranges::any_of(owner.code_bindings, [&](CodeBinding code) {
+          const auto mva = detail::Mmu::modified(runtime->system.mapping, code.address);
+          const auto first = mva & line_mask;
+          const auto last = (std::uint64_t(mva) + code.size - 1) & line_mask;
+          if (operation == detail::Runtime::CodeInvalidation::line) {
+            return line >= first && line <= last;
+          }
+          const auto offset = ((operand & set_mask) - (first & set_mask)) & set_mask;
+          return std::uint64_t(first) + offset <= last;
+        });
+    if (!affected) { return; }
+    owner.revoked = true;
+    owner.revocation_address = pc;
+    runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed);
+    runtime->address = pc;
   }
 
   static std::uint64_t virtual_access(detail::Runtime *runtime,
@@ -616,7 +578,6 @@ struct Core::Impl {
                                       std::uint32_t value,
                                       detail::Runtime::DataCallback data_callback,
                                       detail::Runtime::PageCallback page_callback,
-                                      detail::Runtime::WriteCallback write_callback,
                                       std::uint32_t first,
                                       unsigned count,
                                       detail::Runtime::Privilege privilege,
@@ -639,31 +600,6 @@ struct Core::Impl {
     if (width == 4) { translated.mva |= first & 3; }
     if (owner.translation_failure(translated, false, address)) { return access_failure; }
     const auto storage = owner.storage_address(translated.physical, false);
-    if (storage.space == Memory::Space::bus && (runtime->system.mapping.control & 4) != 0 &&
-        (translated.attributes & 2) != 0) {
-      CacheBus bus{.owner = &owner,
-                   .read = page_read,
-                   .write = static_cast<std::uintptr_t>(write_callback),
-                   .callbacks = callbacks};
-      const auto cached = owner.data_cache.access(
-          {.mva = detail::Mmu::modified(runtime->system.mapping, address),
-           .physical = translated.physical,
-           .value = value,
-           .lockdown = runtime->system.data_cache_lockdown,
-           .width = width,
-           .operation = static_cast<detail::DataCache::Operation>(operation),
-           .big = (runtime->system.mapping.control & 0x80) != 0,
-           .back = (translated.attributes & 1) != 0,
-           .round_robin = (runtime->system.mapping.control & 0x4000) != 0},
-          &CacheBus::access,
-          &bus);
-      if (!cached) { return access_failure; }
-      if (owner.revoked) {
-        runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed);
-        runtime->address = address;
-      }
-      return *cached;
-    }
     if (owner.region(storage.relative, width, storage.space) == nullptr &&
         callbacks == detail::Runtime::Callbacks::probe) {
       bool present = replacement != 0;
@@ -880,7 +816,8 @@ struct Core::Impl {
       case detail::Signal::changed:
         failure(Fault::Kind::changed_code,
                 runtime.address,
-                "executable bytes changed through a guest mapping or alias");
+                "prepared code invalidated or executable bytes changed through a guest mapping or "
+                "alias");
         break;
       case detail::Signal::memory:
         failure(
@@ -1036,7 +973,7 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
     detail::refuse(
         impl_->identity, impl_->runtime.r[15], "reserved CP15 translation/PID mapping bits");
   }
-  constexpr std::uint32_t implemented_control = 0xe387; // M, A, C, B, S, R, V, RR and L4.
+  constexpr std::uint32_t implemented_control = 0xf387; // M, A, C, B, S, R, I, V, RR and L4.
   if ((found->mapping.control & ~implemented_control) !=
       Registers::System::Mapping::reset_control) {
     detail::refuse(impl_->identity,
@@ -1094,11 +1031,8 @@ State Core::state() const {
 
 Snapshot Core::save() const {
   impl_->stopped();
-  return Snapshot(std::make_shared<Snapshot::Impl>(impl_->inspect(),
-                                                   impl_->external_entry,
-                                                   impl_->pending_image,
-                                                   impl_->mmu,
-                                                   impl_->data_cache));
+  return Snapshot(std::make_shared<Snapshot::Impl>(
+      impl_->inspect(), impl_->external_entry, impl_->pending_image, impl_->mmu));
 }
 
 void Core::restore(const Snapshot &snapshot) {
@@ -1124,7 +1058,6 @@ void Core::restore(const Snapshot &snapshot) {
   }
   impl_->runtime.banks = snapshot.impl_->state.banks;
   impl_->mmu = snapshot.impl_->mmu;
-  impl_->data_cache = snapshot.impl_->data_cache;
   impl_->external_entry = snapshot.impl_->external_entry;
   impl_->pending_image = snapshot.impl_->pending_image;
   impl_->runtime.instructions = snapshot.impl_->state.progress.instructions;
@@ -1187,7 +1120,6 @@ void Core::reset(std::uint32_t vector) {
   const auto data_tcm = impl_->runtime.system.mapping.data_tcm & tcm_size_bits;
   impl_->runtime.system = {};
   impl_->mmu = {};
-  impl_->data_cache = {};
   impl_->runtime.system.mapping.instruction_tcm = instruction_tcm;
   impl_->runtime.system.mapping.data_tcm = data_tcm;
   if (impl_->binding &&
