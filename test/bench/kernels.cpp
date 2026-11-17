@@ -4,6 +4,9 @@
 #include "reference.hpp"
 #include "support/isa.hpp"
 #include "support/modes.hpp"
+#ifdef ARMV5_MAPPED_BENCH
+#include "support/mapped.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -32,6 +35,17 @@
 #endif
 
 namespace {
+#ifdef ARMV5_MAPPED_BENCH
+using BenchmarkMachine = fixture::MappedMachine;
+using BenchmarkModes = fixture::MappedMachine;
+#else
+using BenchmarkMachine = fixture::Machine;
+using BenchmarkModes = fixture::Modes;
+#endif
+template <class Machine> void verify_storage(const Machine &machine) {
+  if constexpr (requires { machine.verify_storage(); }) { machine.verify_storage(); }
+}
+
 struct Measurement {
   double seconds = 0, instructions = 0, cycles = 0;
 };
@@ -177,7 +191,7 @@ void copy_kernel(Counters &counters) {
   constexpr std::uint32_t seed = 0x1234567;
   constexpr std::uint32_t shift_mask = 31;
   const auto program = copy_program();
-  fixture::Machine machine(program);
+  BenchmarkMachine machine(program);
   std::vector<std::uint32_t> source(words);
   std::vector<std::uint32_t> destination(words);
   std::uint32_t checksum = 0;
@@ -213,6 +227,7 @@ void copy_kernel(Counters &counters) {
   expected_registers.r[10] = words;
   expected_registers.r[15] = program.pc() - 4;
   auto check = [&] {
+    verify_storage(machine);
     fixture::require(machine.ram == expected && machine.core->registers() == expected_registers,
                      "K5 complete registers and RAM output");
     fixture::require(machine.core->state().execution == armv5::ExecutionState::ready,
@@ -290,7 +305,7 @@ void control_kernel(Counters &counters) {
   constexpr std::uint64_t guests = std::uint64_t(iterations) * 14;
   constexpr std::uint64_t cycles = (std::uint64_t(iterations) * 26) - 2;
   const auto program = control_program();
-  fixture::Machine machine(program);
+  BenchmarkMachine machine(program);
   for (unsigned handler = 0; handler < 8; ++handler) {
     fixture::put(std::span(machine.ram).subspan(std::size_t(handler) * 4, 4),
                  program.address() + ((6 + handler * 6) * 4));
@@ -321,6 +336,7 @@ void control_kernel(Counters &counters) {
   expected_registers.r[14] = expected_registers.r[4] + (5 * 4);
   expected_registers.r[15] = program.address() + (5 * 4);
   auto check = [&] {
+    verify_storage(machine);
     fixture::require(machine.core->registers() == expected_registers && machine.ram == expected,
                      "K4 complete registers/table/stack output");
     fixture::require(machine.core->state().execution == armv5::ExecutionState::ready,
@@ -481,7 +497,7 @@ void fir_kernel(Counters &counters, bool event_load) {
     code.push_back({.program = handler, .modes = {irq_processor_mode}});
     vectors.push_back(irq_vector);
   }
-  fixture::Modes machine(std::move(code), vectors, true, numeric_ram_size);
+  BenchmarkModes machine(std::move(code), vectors, true, numeric_ram_size);
   const auto signal = numeric_input();
   std::vector<std::int32_t> input(taps - 1, 0);
   input.insert(input.end(), signal.begin(), signal.end());
@@ -550,6 +566,7 @@ void fir_kernel(Counters &counters, bool event_load) {
   expected_registers.r[14] = rounding_bias;
   expected_registers.r[15] = program.pc() - 4;
   auto check = [&] {
+    verify_storage(machine);
     const auto state = machine.core->state();
     fixture::require(machine.ram == expected && state.registers == expected_registers &&
                          state.banks.irq[0] == events &&
@@ -647,7 +664,7 @@ fixture::Program biquad_program() {
 
 void biquad_kernel(Counters &counters) {
   const auto program = biquad_program();
-  fixture::Machine machine(program, numeric_ram_size);
+  BenchmarkMachine machine(program, numeric_ram_size);
   const auto input = numeric_input();
   std::vector<std::int32_t> output(outputs);
   std::vector<std::int32_t> answer(outputs);
@@ -694,6 +711,7 @@ void biquad_kernel(Counters &counters) {
   };
   auto work = [&] { (void)machine.core->run(guests); };
   auto check = [&] {
+    verify_storage(machine);
     fixture::require(machine.core->registers() == expected && machine.ram == expected_ram &&
                          machine.core->state().progress ==
                              armv5::Progress{.instructions = guests, .base_cycles = cycles},
@@ -828,7 +846,7 @@ fixture::Program fft_program() {
 
 void fft_kernel(Counters &counters) {
   const auto program = fft_program();
-  fixture::Machine machine(program);
+  BenchmarkMachine machine(program);
   std::array<std::uint32_t, fft_points> input{};
   std::array<std::uint32_t, fft_points> answer{};
   std::array<std::uint32_t, fft_points> output{};
@@ -889,6 +907,7 @@ void fft_kernel(Counters &counters) {
   };
   auto work = [&] { (void)machine.core->run(guests); };
   auto check = [&] {
+    verify_storage(machine);
     fixture::require(machine.core->registers() == expected && machine.ram == expected_ram &&
                          machine.core->state().progress ==
                              armv5::Progress{.instructions = guests, .base_cycles = cycles},

@@ -279,6 +279,7 @@ void aliases_and_transitions() {
 
 int main() {
   try {
+    mapped_memory();
     bounds_and_snapshot();
     artifact_cache();
     callbacks_and_faults();

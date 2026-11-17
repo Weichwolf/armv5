@@ -53,7 +53,8 @@ checked through `Core::lower`; no private decoder or alternate executor is used.
 | Remaining qualification / optimization | Status |
 |---|---|
 | R1 register retention | Qualified in existing SSA mode/state CFG; native K4/K6 register-field attribution is in `benchmarks.md` |
-| Full virtual address-space backing/MMU view, cross-unit flag liveness | Follow R1, before CoreMark; not implemented |
+| Full virtual address-space backing | Guarded 4 GiB consumer baseline qualified through K1–K6 and first/last-word plus low-hole lifecycle tests; production lowering unchanged |
+| Direct host-MMU views and cross-unit flag liveness | Pending before CoreMark; views must also cover guest remapping with exact fallback where host pages cannot express the mapping |
 | CoreMark 1.0 external reference point | After those optimization steps |
 | Sanitizer qualification of own and generated code | After A5; pending |
 | macOS ARM64 semantics and counters | Untested; developer host unavailable |

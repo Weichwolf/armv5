@@ -97,3 +97,24 @@ not a sampled fraction of host execution time.
 Counter refusal is an explicit error, not a zero measurement. macOS ARM64 hardware
 counter collection remains unqualified. The cycle model is documented in
 `doc/api.md`; these measurements do not imply consumer throughput or a board clock.
+
+`build/armv5_mapped_bench [K1|K2|K3|K4|K5|K6]` runs the same programs, inputs,
+oracles and measurement windows with a 4 GiB consumer reservation. A sparse,
+unlinked shared file backs the view; code pages are read-only, undeclared low
+addresses remain protected, and RAM extends from 0x4000 to the end of the 32-bit
+address space. Only the working buffer's pages need physical storage. The
+existing core comparison and exact guest abort path remain in use. No signal
+handler or direct memory mode is introduced by this baseline.
+
+Every warm and measured native run retains the original full-buffer oracle and
+also checks that the rest of RAM remains zero. After synchronizing the shared
+mapping, the checker reads allocated data extents outside the working buffer;
+sparse holes are zero by definition. This validation occurs outside the timed
+and hardware-counter interval. The core fixture also verifies that a native
+store to the final RAM word is detected by this checker. A filesystem without
+sparse-extent queries fails explicitly. Reproduce both layouts with:
+
+```sh
+taskset -c 2 build/armv5_bench
+taskset -c 2 build/armv5_mapped_bench
+```

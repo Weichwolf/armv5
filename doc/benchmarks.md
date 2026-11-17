@@ -1072,3 +1072,77 @@ Published `src/` 5,281 (+0), `test/` 9,183 (+0). The existing Release/ISA/core/b
 qualification remains applicable to the identical source and binaries; no tests
 were changed. R1 is satisfied by the current SSA control flow; memory mapping,
 flag liveness, CoreMark and final sanitizer qualification remain open.
+
+## Guarded full-address-space baseline (b1)
+
+Measured on 2026-11-17 with the same Linux x86-64 host, LLVM/Clang 19.1.7
+and CPU-2 pinning. The additional `armv5_mapped_bench` consumer lends a sparse
+4 GiB reservation through the existing public API: protected low holes,
+read-only code and RAM from 0x4000 through 0xffffffff. Guest programs, inputs,
+retirement, bounds, interrupts and independent numerical oracles are unchanged.
+The complete working buffer is checked after each run, as is the zero-filled
+remainder of RAM through sparse-file extents, outside measurement.
+
+Production source and installed headers are unchanged. Both consumers still
+execute the existing guarded lowering with precise guest aborts. The ordinary
+benchmark retains its original layout. The larger view increases host
+instruction counts on every kernel; this is a measurement baseline, not a
+speedup or a switch of the ordinary memory path.
+
+| Kernel | Ordinary host I/GI | 4 GiB host I/GI | Change | Ordinary host cycles/GI | 4 GiB host cycles/GI |
+|---|---:|---:|---:|---:|---:|
+| K1 | 7.923344 | 8.138682 | +2.72% | 2.147 | 2.250 |
+| K2 | 6.201774 | 6.287618 | +1.38% | 1.659 | 1.674 |
+| K3 | 5.387183 | 5.572458 | +3.44% | 1.429 | 1.511 |
+| K4 | 12.839324 | 13.178610 | +2.64% | 3.218 | 3.279 |
+| K5 | 7.607471 | 8.007471 | +5.26% | 2.124 | 2.281 |
+| K6 | 12.735258 | 12.909793 | +1.37% | 3.915 | 4.015 |
+
+Full metrics for the guarded 4 GiB consumer:
+
+| Kernel | Retired guest instructions | Guest M instructions/s | Native / Clang O3 time | Preparation s | Native text bytes | Text bytes / prepared instruction |
+|---|---:|---:|---:|---:|---:|---:|
+| K1 | 88,867,584 | 1795.214 | 7.012x | 0.118916 | 8,688 | 310.286 |
+| K2 | 61,080,320 | 2425.122 | 3.012x | 0.270793 | 18,611 | 269.725 |
+| K3 | 19,822,080 | 2663.338 | 0.996x | 0.266189 | 17,761 | 281.921 |
+| K4 | 14,680,064 | 1232.983 | 13.270x | 0.773604 | 25,315 | 444.123 |
+| K5 | 10,488,320 | 1752.089 | 44.024x | 0.070855 | 5,541 | 503.727 |
+| K6 | 88,935,668 | 1006.068 | 12.435x | 0.125566 | 9,219 | 307.300 |
+
+Complete K1/K2/K6 contract hashes and all K3–K5 outputs pass in both layouts;
+K6 retains 34,042 IRQs and the same 256-cycle deadlines. Public lifecycle tests
+check the first and last RAM words, precise low-hole abort state/DFSR/FAR and
+detection of a real native store outside the original working buffer. Release
+ISA/core/bench suites and the source-only offline export pass; the updated core
+and both benchmark suites pass again after adding the expanded-storage oracle.
+Configured clang-tidy and clang-format pass. Eleven installed-SDK consumers,
+including a 4 GiB final-word load and snapshot replay, pass using only the two
+installed headers and public library. macOS ARM64 remains untested.
+
+Native stepping of the mapped K4 steady cycle finds 1,476 host instructions
+for 112 guest instructions and 24 RAM accesses. The following lower bound counts
+only access admission and the descriptor's host-address bias load:
+
+| Identified work | Host instructions / 112 GI | Host instructions/GI |
+|---|---:|---:|
+| Range-offset formation and limit setup | 48 | 0.428571 |
+| Range comparisons and conditional branches | 48 | 0.428571 |
+| Store-safety comparisons and conditional branches | 16 | 0.142857 |
+| Descriptor host-address-bias loads | 24 | 0.214286 |
+| Total identified admission/bias work | 136 | 1.214286 |
+
+This is not total memory cost: guest address arithmetic, ARM word alignment
+and rotation, actual loads/stores, PHI moves, host spills and other descriptor
+routing are excluded. The ordinary cycle remains 1,438 host instructions.
+Direct host-MMU views, including non-identity guest mappings and exact fallback
+where host pages cannot express the mapping, remain pending. Their gate compares
+against both this mapped baseline and the original ordinary kernels.
+
+Preparation/compiler identity:
+
+```text
+armv5-e8278ccb5258ebc56aa3e884d70ce69798dfbd587845d725f793ed7b75c101af-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Published `src/` 5,281 (+0), `test/` 9,513 (+330). Flag liveness, CoreMark and
+final sanitizer qualification follow the memory implementation.

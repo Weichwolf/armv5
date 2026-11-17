@@ -113,6 +113,13 @@ Hoist checks only with a valid alias or permission proof. Keep the host stack
 bounded across guest loops. Host SIMD is used only where guest dependencies and
 the numerical contract are proved and the benefit is measured.
 
+The full-address-space benchmark consumer reserves 4 GiB with protected code,
+low holes and sparse shared RAM through the existing public Memory interface.
+It measures the existing guarded path without changing production lowering;
+the ordinary kernels retain their original layouts. Direct access through
+host-MMU views, including guest remapping, remains a subsequent implementation
+step. The baseline and native memory-cost attribution are in `benchmarks.md`.
+
 CP15 register reads load only the required private runtime fields; register-only
 writes leave through a real exit, so no unused system-register PHIs are carried
 through ordinary loops. A variant records the memory-control assumptions used
