@@ -5,7 +5,9 @@ public Core API, preparation decoder and strict build targets. A2 now has direct
 SSA LLVM execution and cacheable preparation. A3 adds specialized mode units,
 banked registers, precise exception entry/return and checked K6 event load;
 A4 adds classic Thumb/interworking, integer/DSP multiplication and all six
-checked kernels. Profile completion remains open. See
+checked kernels. The initial A5 increment adds CP15 register state, context-bound
+variants and separate consumer-owned TCM storage spaces. Memory-system execution
+and profile completion remain open. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text
@@ -97,6 +99,14 @@ every original PC. This transformation has no instruction-count cutoff.
 Hoist checks only with a valid alias or permission proof. Keep the host stack
 bounded across guest loops. Host SIMD is used only where guest dependencies and
 the numerical contract are proved and the benefit is measured.
+
+CP15 register reads load only the required private runtime fields; register-only
+writes leave through a real exit, so no unused system-register PHIs are carried
+through ordinary loops. A variant records the memory-control assumptions used
+by lowering and installation validates the actual processor state against them.
+Consumer-owned TCM storage uses the processor address spaces of contract v7.
+The first A5 increment implements the disabled-storage/geometry lifecycle;
+active routing, MMU/cache effects and maintenance remain explicit open work.
 
 ## ARM926 profile
 

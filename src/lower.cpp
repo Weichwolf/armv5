@@ -179,6 +179,26 @@ bool classify_dsp(const Image &image, std::string_view name, Instruction &result
   return true;
 }
 
+bool classify_system(std::string_view name, Instruction &result) {
+  if (name == "MRC" || name == "MCR") {
+    const auto word = result.word;
+    const auto coprocessor = (word >> 8) & 15;
+    if (coprocessor < 14) {
+      result.operation = Operation::undefined;
+      result.cycles = 3;
+      result.terminates = true;
+      return true;
+    }
+    if (coprocessor == 15) {
+      result.operation = name == "MRC" ? Operation::system_read : Operation::system_write;
+      result.terminates = name == "MCR";
+      result.cycles = name == "MRC" && ((word >> 12) & 15) == 15 ? 4 : 1;
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 Instruction classify_arm(const Image &image, std::uint32_t pc, std::uint32_t word) {
@@ -196,7 +216,7 @@ Instruction classify_arm(const Image &image, std::uint32_t pc, std::uint32_t wor
       .pc = pc, .word = word, .operation = Operation::alu, .cycles = 1, .terminates = false};
   if (classify_alu(image, name, result) || classify_memory(image, name, result) ||
       classify_multiple(image, name, result) || classify_multiply(image, name, result) ||
-      classify_dsp(image, name, result)) {
+      classify_dsp(image, name, result) || classify_system(name, result)) {
     return result;
   }
   if (name == "B" || name == "BL" || name == "BLX immediate") {
@@ -532,10 +552,19 @@ void Lowering::read_code() {
       if (thumb_) {
         const auto first = std::to_integer<std::uint16_t>(span.bytes[offset]);
         const auto second = std::to_integer<std::uint16_t>(span.bytes[offset + 1]);
-        const auto word = image_.options.big_endian ? (first << 8) | second : first | (second << 8);
+        const auto word =
+            (variant_.mapping.control & 0x80) != 0 ? (first << 8) | second : first | (second << 8);
         code_.push_back(thumb_instruction(pc, static_cast<std::uint16_t>(word)));
       } else {
-        code_.push_back(classify_arm(image_, pc, word_at(span, offset, image_.options.big_endian)));
+        auto instruction =
+            classify_arm(image_, pc, word_at(span, offset, (variant_.mapping.control & 0x80) != 0));
+        if (mode_ == user_mode && (instruction.operation == Operation::system_read ||
+                                   instruction.operation == Operation::system_write)) {
+          instruction.operation = Operation::undefined;
+          instruction.cycles = 3;
+          instruction.terminates = true;
+        }
+        code_.push_back(instruction);
       }
     }
   }
@@ -668,6 +697,10 @@ bool Lowering::emit_event(const Instruction &instruction,
                           Values &values,
                           llvm::Value *old_status,
                           bool yielded) {
+  if (instruction.operation == Operation::system_write) {
+    exit(values, Signal::redispatch, values.r[15]);
+    return true;
+  }
   const bool mode_change = instruction.operation == Operation::msr && instruction.terminates;
   if (exception_return(instruction) || mode_change) {
     auto *status = mode_change ? values.status : values.spsr;
@@ -788,9 +821,13 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
     case Operation::multiple: multiple(instruction, values); break;
     case Operation::mrs:
     case Operation::msr: status_transfer(instruction, values); break;
+    case Operation::system_read:
+    case Operation::system_write: system_transfer(instruction, values); break;
     case Operation::preload: break; // Advisory hint has no required architectural access or effect.
   }
-  if (!instruction.terminates) { values.r[15] = c32(instruction.next()); }
+  if (!instruction.terminates || instruction.operation == Operation::system_write) {
+    values.r[15] = c32(instruction.next());
+  }
   values.instructions = ir_.CreateAdd(values.instructions, c64(1));
   values.cycles = ir_.CreateAdd(values.cycles, c64(instruction.cycles));
   if (instruction.operation == Operation::single || instruction.operation == Operation::extra ||

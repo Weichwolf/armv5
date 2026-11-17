@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "armv5/memory.hpp"
+
 #include "armv5/core.hpp"
 #include "image.hpp"
 #include "lower.hpp"
@@ -71,6 +73,7 @@ llvm::Value *Lowering::access(
   });
   for (const auto index : order) {
     const auto &region = variant_.layout[index];
+    if (region.space != Memory::Space::bus) { continue; }
     auto *mapped = block("memory.direct");
     auto *next = block("memory.next");
     auto *wide_address = ir_.CreateZExt(address, ir_.getInt64Ty());
@@ -95,7 +98,8 @@ llvm::Value *Lowering::access(
     auto *pointer = ir_.CreateIntToPtr(ir_.CreateAdd(bias, wide_address), ir_.getPtrTy());
     auto *type = ir_.getIntNTy(width * 8);
     llvm::Value *loaded = c32(0);
-    const bool swap_endian = image_.options.big_endian != (std::endian::native == std::endian::big);
+    const bool swap_endian =
+        ((variant_.mapping.control & 0x80) != 0) != (std::endian::native == std::endian::big);
     if (operation == 0) {
       loaded = ir_.CreateAlignedLoad(type, pointer, llvm::Align(1));
       if (swap_endian && width > 1) {

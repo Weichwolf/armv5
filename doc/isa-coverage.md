@@ -1,8 +1,8 @@
 # ISA and implementation coverage
 
-A4 executes the ARM/Thumb operations and modes below through prepared LLVM
-images. This is **not** complete ARMv5TEJ qualification. CP15 and the ARM926
-memory system remain open.
+A4 and the initial A5 register/storage increment execute the operations below
+through prepared LLVM images. This is **not** complete ARMv5TEJ qualification.
+The ARM926 memory system and remaining CP15 effects are open.
 Tests are independently authored programs, run through the public interface with
 installed images. Rejected preparation cannot produce an installed image and is
 checked through `Core::lower`; no private decoder or alternate executor is used.
@@ -17,6 +17,9 @@ checked through `Core::lower`; no private decoder or alternate executor is used.
 | LDRH/STRH/LDRSB/LDRSH/LDRD/STRD | Immediate/register addressing implemented, signed extension and pairs; fixtures cover signed byte/halfword and doubleword loads/stores in both byte orders. Unpredictable alignment and operand combinations explicitly refuse; exhaustive addressing combinations remain open |
 | LDM/STM | Ordinary-bank IA/IB/DA/DB implemented, ordered transfers and writeback; independent stack push/pop fixtures and K4 returns; user-bank forms independently checked in all five exception modes, plus LDM^ exception return and old-bank writeback |
 | SWP/SWPB | One atomic I/O callback or one owner RAM transaction; byte/word and legacy alignment implemented, both byte orders checked |
+| CP15 MRC and register-only MCR | `test/isa/system.cpp` independently checks reset ID aliases/cache geometry, control/TTBR/domain/fault/context/lockdown reads, software writes to DFSR/IFSR/FAR/context ID, NZCV-only MRC R15, predication and User-mode Undefined. Fault-register updates from architectural aborts and mapping/cache/TLB writes remain pending |
+| Absent external coprocessors | MRC/MCR to coprocessors 0–13 take precise Undefined without transferring data; all 14 numbers and both directions have full-state/vector checks. Other coprocessor instruction classes and CP14 remain open |
+| TCM storage and CP15 assumptions | `test/core/system.cpp` checks independent zero-based bus/ITCM/DTCM storage, presence/size reads, disabled routing and retained bytes, geometry refusal, context-specific install/revocation, snapshot/profile checks and artifact identity. Active TCM routing remains pending |
 | MRS/MSR | CPSR/SPSR reads and byte-selected writes, privilege masks and dynamic mode validation; all seven modes switch prepared units. All five SPSRs roundtrip and restore NZCVQ/mode through MOVS PC and LDM^; invalid User/System SPSR forms refuse preparation |
 | MUL/MLA/MULS/MLAS | Direct SSA multiplication and accumulate modulo 2^32; independent edge products, NZ updates and CVQ preservation; K6 FIR. Long/DSP forms covered below |
 | UMULL/UMLAL/SMULL/SMLAL | All signed/unsigned, accumulate and S variants; independent 64-bit edge products, wraparound, complete register results, NZ with CVQ preservation and input/output aliases in `test/isa/dsp.cpp` |

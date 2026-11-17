@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -15,10 +16,26 @@
 namespace armv5 {
 
 struct Registers {
+  struct System {
+    struct Mapping {
+      static constexpr std::uint32_t reset_control = 0x00050078;
+      std::uint32_t control = reset_control;
+      std::uint32_t translation_table = 0, domains = 0, process_id = 0;
+      std::uint32_t instruction_tcm = 0, data_tcm = 0;
+      bool operator==(const Mapping &) const = default;
+    } mapping;
+
+    std::uint32_t data_fault_status = 0, instruction_fault_status = 0, fault_address = 0;
+    std::uint32_t context_id = 0;
+    std::uint32_t instruction_cache_lockdown = 0, data_cache_lockdown = 0, tlb_lockdown = 0;
+    bool operator==(const System &) const = default;
+  };
+
   static constexpr std::uint32_t reset_cpsr = 0x000000d3;
   std::array<std::uint32_t, 16> r{};
   std::uint32_t cpsr = reset_cpsr; // ARM, supervisor, IRQ and FIQ masked.
   std::uint32_t spsr = 0;
+  System system{};
   bool operator==(const Registers &) const = default;
 };
 
@@ -80,12 +97,16 @@ struct CodeVariant {
   std::uint32_t id = 0;
   std::span<const CodeSpan> spans;
   std::span<const std::uint32_t> entries;
+  // Absent inherits the reset mapping and CompileOptions::big_endian. Explicit
+  // contexts declare the CP15 assumptions of this coherent prepared variant.
+  std::optional<Registers::System::Mapping> mapping = std::nullopt;
 };
 
 struct RegionLayout {
   std::uint32_t address = 0;
   std::uint64_t size = 0;
   bool readable = true, writable = false, executable = false;
+  Memory::Space space = Memory::Space::bus;
 };
 
 struct VariantLayout {

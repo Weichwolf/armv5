@@ -47,6 +47,40 @@ revokes any old binding. Installed images are immutable and can be shared betwee
 independent owners. `set_memory` copies new storage descriptors while stopped
 and revokes the binding; a new matching install is required.
 
+## CP15 state and storage spaces
+
+`Registers::system` exposes the implemented CP15 register state. Its `mapping`
+contains the control register, translation-table base, domains, FCSE PID and
+instruction/data TCM region registers. Fault-status/address, context ID and
+lockdown registers are separate fields. They are included in state inspection
+and snapshots. The current profile reports r0p5 ID `0x41069265`, 16KB instruction
+and 8KB data caches, four ways and 32-byte lines. Cache/MMU execution effects
+remain pending; reporting geometry does not enable those paths.
+
+`CodeVariant::mapping` optionally declares the CP15 assumptions for that coherent
+variant. Omission inherits the reset mapping and `CompileOptions::big_endian`.
+An explicit context selects its own B bit for both instruction bytes and data.
+The consumer initializes the actual processor state with `set_registers` before
+installation; installation checks it and never initializes it implicitly. A
+mapping change through `set_registers` revokes the old native binding. A snapshot
+restores processor mapping state; a differently configured installed binding is
+revoked. Non-mapping CP15 state does not invalidate the mapping proof.
+
+`Memory::Region::space` and `RegionLayout::space` select `bus`, `itcm` or `dtcm`.
+Bus is the default. Each TCM space lends at most one zero-based region of 4KB to
+1MB, with power-of-two size. The space and size define processor storage geometry
+before installation; instruction and data TCM can overlap bus addresses while
+retaining independent consumer-owned bytes. Reset disables the TCMs and retains
+their geometry. Disabled TCM storage is excluded from ordinary bus accesses.
+Snapshots contain the CP15 region state, not the lent bytes; restoring across a
+different TCM geometry is rejected before processor state changes.
+
+This first A5 increment implements CP15 register reads, software writes of the
+fault/context registers, privilege and absent MRC/MCR coprocessor traps, and these
+storage/binding rules. Active TCM, alignment/high-vector/MMU/cache control and
+mapping/maintenance writes still fail explicitly. Architectural fault-register
+updates and the remaining CP15 operations are pending. See `isa-coverage.md`.
+
 ## Execution and snapshots
 
 `run(n)` returns after exactly n complete instructions, or earlier on a refusal,

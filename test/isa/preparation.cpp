@@ -434,7 +434,7 @@ void preparation_refusals() {
       Case{.word = 0xe08f0293, .reason = "unpredictable long/DSP multiply"},
       Case{.word = 0xe18200d0, .reason = "doubleword index/destination overlap"},
       Case{.word = 0xe1e000f8, .reason = "writeback overlap/PC"},
-      Case{.word = 0xee100f10, .reason = "MRC: instruction is not lowered"}};
+      Case{.word = 0xee140f10, .reason = "unsupported CP15 register/operation selector"}};
   for (const auto &[word, reason] : cases) {
     fixture::Program program;
     program.word(word);
@@ -462,6 +462,7 @@ int main() {
     extra_and_multiple();
     status_and_predicated_memory();
     swaps();
+    system_registers();
     preparation_refusals();
     memory_boundaries();
     processor_modes();

@@ -47,6 +47,8 @@ struct Runtime {
   using Access = std::uint64_t (*)(
       Runtime *, std::uint32_t, unsigned, unsigned, std::uint32_t, std::uintptr_t) noexcept;
   Access access = nullptr;
+  Registers::System system;
+  std::uint32_t tcm_status = 0;
 };
 
 static_assert(std::is_standard_layout_v<Runtime>);

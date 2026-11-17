@@ -46,7 +46,9 @@ enum class Operation : std::uint8_t {
   undefined,
   breakpoint,
   thumb_link_prefix,
-  thumb_link_suffix
+  thumb_link_suffix,
+  system_read,
+  system_write
 };
 
 struct Instruction {
@@ -187,6 +189,7 @@ private:
   llvm::Value *user_reg(const Values &values, unsigned index) const;
   void set_user_reg(Values &values, unsigned index, llvm::Value *value) const;
   void status_transfer(const Instruction &instruction, Values &values);
+  void system_transfer(const Instruction &instruction, Values &values);
   llvm::Value *access(
       Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value);
   llvm::Value *slow_access(

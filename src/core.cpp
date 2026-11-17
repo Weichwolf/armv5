@@ -63,6 +63,15 @@ constexpr std::uint64_t access_failure = std::uint64_t{1} << 32;
 constexpr std::uint32_t mode_bits = 0x1f, execution_bits = 0x01000020, thumb_bit = 0x20,
                         jazelle_bit = 0x01000000, byte_mask = 255;
 
+bool same_mapping(Registers::System::Mapping first, Registers::System::Mapping second) {
+  constexpr std::uint32_t tcm_size_bits = 0x3c;
+  if ((first.instruction_tcm & 1) == 0) { first.instruction_tcm &= ~tcm_size_bits; }
+  if ((second.instruction_tcm & 1) == 0) { second.instruction_tcm &= ~tcm_size_bits; }
+  if ((first.data_tcm & 1) == 0) { first.data_tcm &= ~tcm_size_bits; }
+  if ((second.data_tcm & 1) == 0) { second.data_tcm &= ~tcm_size_bits; }
+  return first == second;
+}
+
 struct HostRange {
   std::uintptr_t address;
   std::size_t size;
@@ -268,21 +277,49 @@ struct Core::Impl {
     code_ranges.clear();
     runtime.direct = nullptr;
     regions.assign(memory.regions.begin(), memory.regions.end());
-    std::ranges::sort(regions, {}, &Memory::Region::address);
+    std::ranges::sort(regions, [](const Memory::Region &first, const Memory::Region &second) {
+      return std::pair{first.space, first.address} < std::pair{second.space, second.address};
+    });
     std::uint64_t end = 0;
+    auto space = Memory::Space::bus;
+    runtime.tcm_status = 0;
+    constexpr std::uint32_t tcm_address_enable = 0xfffff001;
+    runtime.system.mapping.instruction_tcm &= tcm_address_enable;
+    runtime.system.mapping.data_tcm &= tcm_address_enable;
     for (const auto &region : regions) {
-      if (region.bytes.empty() || region.bytes.size() > (std::uint64_t{1} << 32) - region.address ||
+      if (space != region.space) { end = 0; }
+      space = region.space;
+      if (static_cast<unsigned>(space) > static_cast<unsigned>(Memory::Space::dtcm) ||
+          region.bytes.empty() || region.bytes.size() > (std::uint64_t{1} << 32) - region.address ||
           region.address < end) {
         throw std::invalid_argument("invalid/overlapping guest memory regions");
+      }
+      if (space != Memory::Space::bus) {
+        constexpr std::size_t minimum_tcm = 4096;
+        constexpr std::size_t maximum_tcm = 1U << 20;
+        if (region.address != 0 || end != 0 || !std::has_single_bit(region.bytes.size()) ||
+            region.bytes.size() < minimum_tcm || region.bytes.size() > maximum_tcm) {
+          throw std::invalid_argument("TCM needs one zero-based power-of-two region of 4KB to 1MB");
+        }
+        const auto size = static_cast<std::uint32_t>(std::countr_zero(region.bytes.size()) - 9)
+                          << 2;
+        if (space == Memory::Space::itcm) {
+          runtime.system.mapping.instruction_tcm |= size;
+          runtime.tcm_status |= 1;
+        } else {
+          runtime.system.mapping.data_tcm |= size;
+          runtime.tcm_status |= 0x10000;
+        }
       }
       end = region.address + region.bytes.size();
     }
     generation = memory.generation;
   }
 
-  [[nodiscard]] const Memory::Region *region(std::uint32_t address, unsigned width) const {
+  [[nodiscard]] const Memory::Region *
+  region(std::uint32_t address, unsigned width, Memory::Space space = Memory::Space::bus) const {
     for (const auto &candidate : regions) {
-      if (address >= candidate.address &&
+      if (candidate.space == space && address >= candidate.address &&
           std::uint64_t(address - candidate.address) + width <= candidate.bytes.size()) {
         return &candidate;
       }
@@ -356,7 +393,8 @@ struct Core::Impl {
       return access_failure;
     }
     auto bytes = region->bytes.subspan(address - region->address, width);
-    const bool big_endian = owner.binding->image->options.big_endian;
+    const bool big_endian =
+        (owner.binding->image->variants[owner.variant_index].mapping.control & 0x80) != 0;
     const bool aliases_code = operation != 0 && owner.code_overlap(bytes);
     const auto old = operation != 1 || aliases_code ? read_bytes(bytes, big_endian) : 0;
     if (operation != 0) {
@@ -397,7 +435,7 @@ struct Core::Impl {
 
   void validate_layout(const detail::Variant &variant) {
     for (const auto &layout : variant.layout) {
-      const auto *mapping = region(layout.address, 1);
+      const auto *mapping = region(layout.address, 1, layout.space);
       if (mapping == nullptr || mapping->address != layout.address ||
           mapping->bytes.size() != layout.size || mapping->readable != layout.readable ||
           mapping->writable != layout.writable || mapping->executable != layout.executable) {
@@ -412,7 +450,8 @@ struct Core::Impl {
 
   [[nodiscard]] State inspect() const {
     auto result = continuation;
-    result.registers = {.r = runtime.r, .cpsr = runtime.cpsr, .spsr = runtime.spsr};
+    result.registers = {
+        .r = runtime.r, .cpsr = runtime.cpsr, .spsr = runtime.spsr, .system = runtime.system};
     result.banks = runtime.banks;
     save_bank(result.banks);
     result.progress = {.instructions = runtime.instructions, .base_cycles = runtime.cycles};
@@ -593,6 +632,16 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
   if (found == variants.end()) {
     detail::refuse(impl_->identity, impl_->runtime.r[15], "unknown installed variant");
   }
+  if (!same_mapping(impl_->runtime.system.mapping, found->mapping)) {
+    detail::refuse(
+        impl_->identity, impl_->runtime.r[15], "CP15 mapping differs from prepared variant");
+  }
+  if ((found->mapping.control & ~0x80U) != Registers::System::Mapping::reset_control ||
+      (found->mapping.instruction_tcm & 1) != 0 || (found->mapping.data_tcm & 1) != 0) {
+    detail::refuse(impl_->identity,
+                   impl_->runtime.r[15],
+                   "CP15 memory-control behavior is not implemented for this configuration yet");
+  }
   impl_->validate_code(*found);
   impl_->validate_layout(*found);
   impl_->binding = image.impl_;
@@ -609,7 +658,10 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
 }
 
 Registers Core::registers() const {
-  return {.r = impl_->runtime.r, .cpsr = impl_->runtime.cpsr, .spsr = impl_->runtime.spsr};
+  return {.r = impl_->runtime.r,
+          .cpsr = impl_->runtime.cpsr,
+          .spsr = impl_->runtime.spsr,
+          .system = impl_->runtime.system};
 }
 
 void Core::set_registers(const Registers &registers) {
@@ -621,6 +673,17 @@ void Core::set_registers(const Registers &registers) {
   impl_->runtime.r = registers.r;
   impl_->runtime.cpsr = registers.cpsr;
   impl_->runtime.spsr = registers.spsr;
+  if (!same_mapping(impl_->runtime.system.mapping, registers.system.mapping)) {
+    impl_->binding.reset();
+    impl_->runtime.direct = nullptr;
+  }
+  constexpr std::uint32_t tcm_size_bits = 0x3c;
+  auto system = registers.system;
+  system.mapping.instruction_tcm = (system.mapping.instruction_tcm & ~tcm_size_bits) |
+                                   (impl_->runtime.system.mapping.instruction_tcm & tcm_size_bits);
+  system.mapping.data_tcm = (system.mapping.data_tcm & ~tcm_size_bits) |
+                            (impl_->runtime.system.mapping.data_tcm & tcm_size_bits);
+  impl_->runtime.system = system;
   impl_->external_entry = true;
 }
 
@@ -636,10 +699,25 @@ Snapshot Core::save() const {
 
 void Core::restore(const Snapshot &snapshot) {
   impl_->stopped();
+  constexpr std::uint32_t tcm_size_bits = 0x3c;
+  const auto &saved_mapping = snapshot.impl_->state.registers.system.mapping;
+  const auto &current_mapping = impl_->runtime.system.mapping;
+  if ((((saved_mapping.instruction_tcm ^ current_mapping.instruction_tcm) |
+        (saved_mapping.data_tcm ^ current_mapping.data_tcm)) &
+       tcm_size_bits) != 0) {
+    throw std::invalid_argument("snapshot TCM geometry differs from the current memory profile");
+  }
   impl_->continuation = snapshot.impl_->state;
   impl_->runtime.r = snapshot.impl_->state.registers.r;
   impl_->runtime.cpsr = snapshot.impl_->state.registers.cpsr;
   impl_->runtime.spsr = snapshot.impl_->state.registers.spsr;
+  impl_->runtime.system = snapshot.impl_->state.registers.system;
+  if (impl_->binding &&
+      !same_mapping(impl_->runtime.system.mapping,
+                    impl_->binding->image->variants[impl_->variant_index].mapping)) {
+    impl_->binding.reset();
+    impl_->runtime.direct = nullptr;
+  }
   impl_->runtime.banks = snapshot.impl_->state.banks;
   impl_->external_entry = snapshot.impl_->external_entry;
   impl_->pending_image = snapshot.impl_->pending_image;
@@ -698,6 +776,18 @@ void Core::reset(std::uint32_t vector) {
   impl_->runtime.r[15] = vector;
   impl_->runtime.cpsr = Registers::reset_cpsr;
   impl_->runtime.spsr = 0;
+  constexpr std::uint32_t tcm_size_bits = 0x3c;
+  const auto instruction_tcm = impl_->runtime.system.mapping.instruction_tcm & tcm_size_bits;
+  const auto data_tcm = impl_->runtime.system.mapping.data_tcm & tcm_size_bits;
+  impl_->runtime.system = {};
+  impl_->runtime.system.mapping.instruction_tcm = instruction_tcm;
+  impl_->runtime.system.mapping.data_tcm = data_tcm;
+  if (impl_->binding &&
+      !same_mapping(impl_->runtime.system.mapping,
+                    impl_->binding->image->variants[impl_->variant_index].mapping)) {
+    impl_->binding.reset();
+    impl_->runtime.direct = nullptr;
+  }
   impl_->runtime.banks = {};
   impl_->runtime.instructions = 0;
   impl_->runtime.cycles = 0;

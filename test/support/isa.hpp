@@ -16,6 +16,7 @@
 
 void dsp_instructions();
 void thumb_instructions();
+void system_registers();
 
 namespace fixture {
 inline constexpr unsigned condition_shift = 28, immediate_bit = 25, opcode_shift = 21,
@@ -187,6 +188,13 @@ public:
   }
 
   void prepare(const armv5::CompileOptions &options = {}, bool fixed_layout = true) {
+    auto initial = core->registers();
+    const auto control =
+        (initial.system.mapping.control & ~0x80U) | (options.big_endian ? 0x80 : 0);
+    if (initial.system.mapping.control != control) {
+      initial.system.mapping.control = control;
+      core->set_registers(initial);
+    }
     native.emplace(armv5::Core::compile(image(fixed_layout), options));
     (void)core->install(*native, 0);
   }

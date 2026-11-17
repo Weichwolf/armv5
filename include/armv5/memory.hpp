@@ -11,10 +11,13 @@ namespace armv5 {
 // changes executable bytes/mappings only while stopped, then calls set_memory
 // with a new generation and installs a declared variant before executing again.
 struct Memory {
+  enum class Space : std::uint8_t { bus, itcm, dtcm };
+
   struct Region {
     std::uint32_t address = 0;
     std::span<std::byte> bytes;
     bool readable = true, writable = true, executable = false;
+    Space space = Space::bus;
   };
 
   std::span<const Region> regions;

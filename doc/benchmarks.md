@@ -355,3 +355,52 @@ armv5-b51947cc288d967fe589d2bc4816779c50ec4f3c8642dd05d5c81565b3c313ac-llvm-19.1
 Published increment totals: `src/` 3,877 lines (+167), `test/` 4,607 (+281)
 against the PC-yield increment. A5/profile completion, CoreMark and final
 sanitizer qualification remain open. macOS ARM64 remains untested.
+
+
+## Initial A5 register and storage context
+
+Contract v7 supplies processor-private storage through address-space regions.
+The first A5 increment adds CP15 register state, lazy MRC field loads,
+register-only MCR exits, context-checked variants and disabled TCM storage
+geometry/lifecycle. Active MMU/TCM/cache/alignment/high-vector control remains an
+explicit refusal; this is not A5 completion or a memory-system benchmark claim.
+
+Same host and warm hardware method as above; every complete output passes.
+K1–K5 instruction counts and all six generated text sizes are unchanged. K1/K5
+consumer-bound object `.text` is byte-identical to the preceding increment
+(8,097/5,424 bytes), checked independently of compiler/input identities. No CP15
+field loads were added to their generated loops.
+
+K6 rises from 12.378 to 12.426 I/GI in the full public-interface event workload.
+Its frequent `state()` inspection now returns the additional CP15 fields; those
+copies are visible in the host assembly. The larger observable state therefore
+has a measurable owner cost even though generated guest text is unchanged.
+There is no claim of zero aggregate K6 regression. Native code and processor
+state must be distinguished from the consumer's explicit full-state inspection.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.941 | 2.151 | 0.526721 | 1898.538 | 6.711x | 0.108874 | 8,097 | 289.179 |
+| K2 | 6.167 | 1.674 | 0.415080 | 2409.174 | 3.033x | 0.248915 | 16,168 | 234.319 |
+| K3 | 5.408 | 1.424 | 0.348233 | 2871.642 | 0.933x | 0.227581 | 16,833 | 267.190 |
+| K4 | 12.321 | 3.131 | 0.765624 | 1306.123 | 12.521x | 0.730008 | 21,799 | 382.439 |
+| K5 | 7.808 | 2.087 | 0.514140 | 1944.994 | 39.206x | 0.066339 | 5,424 | 493.091 |
+| K6 | 12.426 | 3.835 | 0.954833 | 1047.304 | 12.171x | 0.118172 | 8,772 | 292.400 |
+
+Guest instructions/base cycles per sample are unchanged; native guest share is
+100%. K6 still checks 34,042 IRQs under 256-cycle bounds and the Q1.15 K1 hash.
+
+```text
+armv5-247e501d6b24dc85c092c67cc327b130b3a29824004e3cd2df0efe61460b5c8b-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites, configured clang-tidy/format,
+offline source export and an installed SDK consumer including CP15 register
+access. Independent ISA and lifecycle fixtures are in `test/isa/system.cpp` and
+`test/core/system.cpp`; they cover both byte orders, exact privilege/absent
+coprocessor traps, software state/readback, snapshots, geometry and binding/cache
+identity refusals. No manufacturer program bytes are used.
+
+Published increment totals: `src/` 4,146 lines (+269), `test/` 5,018 (+411)
+against the loop-grant increment. A5 memory-system completion, CoreMark, final
+sanitizers and macOS ARM64 qualification remain open.

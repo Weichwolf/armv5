@@ -25,6 +25,7 @@ struct Variant {
   std::vector<Span> spans;
   std::vector<std::uint32_t> entries;
   std::vector<RegionLayout> layout;
+  Registers::System::Mapping mapping;
 };
 
 struct Unit {

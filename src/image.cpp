@@ -2,6 +2,7 @@
 #include "image.hpp"
 
 #include "armv5/core.hpp"
+#include "armv5/memory.hpp"
 #include "identity.hpp"
 
 #include <algorithm>
@@ -95,6 +96,16 @@ Bytes input_bytes(const CodeImage &input, const CompileOptions &options) {
   out.number(input.variants.size());
   for (const auto &variant : input.variants) {
     out.number(variant.id);
+    out.number(static_cast<std::uint64_t>(variant.mapping.has_value()));
+    if (variant.mapping) {
+      const auto &mapping = *variant.mapping;
+      out.number(mapping.control);
+      out.number(mapping.translation_table);
+      out.number(mapping.domains);
+      out.number(mapping.process_id);
+      out.number(mapping.instruction_tcm);
+      out.number(mapping.data_tcm);
+    }
     out.number(variant.spans.size());
     for (const auto &span : variant.spans) {
       out.number(span.address);
@@ -113,6 +124,7 @@ Bytes input_bytes(const CodeImage &input, const CompileOptions &options) {
     for (const auto &region : layout.regions) {
       out.number(region.address);
       out.number(region.size);
+      out.number(static_cast<unsigned>(region.space));
       out.number(static_cast<std::uint64_t>(region.readable));
       out.number(static_cast<std::uint64_t>(region.writable));
       out.number(static_cast<std::uint64_t>(region.executable));
@@ -173,9 +185,13 @@ void validate_variant(std::string_view identity, const Variant &variant) {
     }
   }
   std::uint64_t end = 0;
+  auto space = Memory::Space::bus;
   for (const auto &region : variant.layout) {
+    if (region.space != space) { end = 0; }
+    space = region.space;
     if (region.size == 0 || region.size > (std::uint64_t{1} << 32) - region.address ||
-        region.address < end) {
+        region.address < end ||
+        static_cast<unsigned>(space) > static_cast<unsigned>(Memory::Space::dtcm)) {
       refuse(identity, region.address, "invalid or overlapping fixed memory layout");
     }
     end = region.address + region.size;
@@ -221,6 +237,13 @@ Span copy_span(std::string_view identity, const CodeSpan &span, const CompileOpt
           .bytes = {span.bytes.begin(), span.bytes.end()},
           .modes = std::move(modes),
           .thumb = thumb};
+}
+
+Registers::System::Mapping prepared_mapping(const CodeVariant &variant,
+                                            const CompileOptions &options) {
+  auto mapping = variant.mapping.value_or(Registers::System::Mapping{});
+  if (!variant.mapping && options.big_endian) { mapping.control |= 0x80; }
+  return mapping;
 }
 
 void validate_links(const CodeImage &input, const Image &image) {
@@ -297,7 +320,8 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
     Variant copy{.id = variant.id,
                  .spans = {},
                  .entries = {variant.entries.begin(), variant.entries.end()},
-                 .layout = {}};
+                 .layout = {},
+                 .mapping = prepared_mapping(variant, options)};
     for (const auto &span : variant.spans) {
       copy.spans.push_back(copy_span(input.identity, span, options));
     }
@@ -309,7 +333,9 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
       found_layout = true;
       copy.layout.assign(layout.regions.begin(), layout.regions.end());
     }
-    std::ranges::sort(copy.layout, {}, &RegionLayout::address);
+    std::ranges::sort(copy.layout, [](const RegionLayout &first, const RegionLayout &second) {
+      return std::pair{first.space, first.address} < std::pair{second.space, second.address};
+    });
     validate_variant(input.identity, copy);
     std::set<std::pair<std::uint32_t, bool>> modes;
     for (const auto &span : copy.spans) {
@@ -331,7 +357,7 @@ void pack(Image &image, const CodeImage &input) {
   payload.number(image.exports.size());
   for (const auto &symbol : image.exports) { payload.text(symbol); }
   Writer out;
-  out.text("armv5-artifact-v4");
+  out.text("armv5-artifact-v5");
   out.text(compiler_identity);
   out.blob(digest(payload.bytes));
   out.blob(payload.bytes);
@@ -343,7 +369,7 @@ Image unpack(const CodeImage &input,
              std::span<const std::byte> artifact) {
   try {
     Reader reader{.bytes = artifact};
-    if (reader.text() != "armv5-artifact-v4" || reader.text() != compiler_identity) {
+    if (reader.text() != "armv5-artifact-v5" || reader.text() != compiler_identity) {
       throw std::runtime_error("artifact compiler identity mismatch");
     }
     const auto checksum = reader.blob();
