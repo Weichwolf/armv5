@@ -13,15 +13,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DIBuilder.h>
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/IR/Metadata.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/Casting.h>
 #include <llvm/Support/raw_ostream.h>
@@ -291,7 +295,9 @@ Lowering::Lowering(Image &image,
                    llvm::Module &module,
                    const std::string &name,
                    std::uint32_t mode,
-                   bool thumb)
+                   bool thumb,
+                   bool direct,
+                   llvm::DIBuilder &debug)
     : image_(image),
       variant_(variant),
       module_(module),
@@ -304,8 +310,21 @@ Lowering::Lowering(Image &image,
                                  module)),
       mode_(mode),
       thumb_(thumb),
+      direct_mode_(direct),
       runtime_(function_->getArg(0)) {
   function_->addFnAttr(llvm::Attribute::NoUnwind);
+  auto *file = debug.createFile("armv5-v" + std::to_string(variant.id), "");
+  auto *type = debug.createSubroutineType(debug.getOrCreateTypeArray({}));
+  auto *scope = debug.createFunction(file,
+                                     name,
+                                     name,
+                                     file,
+                                     0,
+                                     type,
+                                     0,
+                                     llvm::DINode::FlagZero,
+                                     llvm::DISubprogram::SPFlagDefinition);
+  function_->setSubprogram(scope);
 }
 
 llvm::Value *Lowering::c32(std::uint32_t value) {
@@ -481,6 +500,7 @@ Values Lowering::entry_values() {
 }
 
 void Lowering::unknown_target(Values values, llvm::Value *target, Signal bound_signal) {
+  auto *previous_signal = pending_signal_;
   values.r[15] = target;
   auto *bound = block("bound");
   auto *missing = block("missing");
@@ -493,6 +513,7 @@ void Lowering::unknown_target(Values values, llvm::Value *target, Signal bound_s
   ir_.SetInsertPoint(missing);
   fetch_instruction(values, target, thumb_ ? 2 : 4);
   exit(values, Signal::unprepared, target);
+  pending_signal_ = previous_signal;
 }
 
 void Lowering::edge(Values values, std::uint32_t target) {
@@ -793,6 +814,9 @@ bool Lowering::emit_event(const Instruction &instruction,
 
 void Lowering::emit_instruction(const Instruction &instruction, Values &values) {
   emitting_pc_ = instruction.pc;
+  if (auto *scope = function_->getSubprogram()) {
+    ir_.SetCurrentDebugLocation(llvm::DILocation::get(context_, instruction.pc + 1, 0, scope));
+  }
   values.r[15] = c32(instruction.pc);
   pending_signal_ = c32(0);
   abort_base_ = nullptr;
@@ -952,6 +976,7 @@ void Lowering::emit() {
   instruction_bound_ = load(ir_.getInt64Ty(), offsetof(Runtime, instruction_bound));
   cycle_bound_ = load(ir_.getInt64Ty(), offsetof(Runtime, cycle_bound));
   direct_ = load(ir_.getPtrTy(), offsetof(Runtime, direct));
+  if (direct_mode_) { view_base_ = load(ir_.getInt64Ty(), offsetof(Runtime, view_base)); }
   exit_ = join("exit");
   llvm::IRBuilder<> exit_builder(exit_.block);
   exit_signal_ = exit_builder.CreatePHI(ir_.getInt32Ty(), 2);
@@ -994,13 +1019,29 @@ void lower_llvm(Image &image) {
   llvm::LLVMContext context;
   llvm::Module module(image.identity, context);
   module.setTargetTriple(llvm::sys::getDefaultTargetTriple());
+  llvm::DIBuilder debug(module);
+  {
+    auto *file = debug.createFile("armv5", "");
+    debug.createCompileUnit(llvm::dwarf::DW_LANG_C_plus_plus,
+                            file,
+                            "armv5",
+                            true,
+                            "",
+                            0,
+                            "",
+                            llvm::DICompileUnit::LineTablesOnly);
+    module.addModuleFlag(llvm::Module::Warning, "Debug Info Version", llvm::DEBUG_METADATA_VERSION);
+    module.addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
+  }
   for (const auto &unit : image.units) {
     const auto &variant = image.variants[unit.variant];
     const auto name = "armv5_" + image.key + "_v" + std::to_string(variant.id) + "_m" +
-                      std::to_string(unit.mode) + (unit.thumb ? "t" : "a");
-    Lowering(image, variant, module, name, unit.mode, unit.thumb).emit();
+                      std::to_string(unit.mode) + (unit.thumb ? "t" : "a") +
+                      (unit.direct ? "d" : "e");
+    Lowering(image, variant, module, name, unit.mode, unit.thumb, unit.direct, debug).emit();
     image.exports.push_back(name);
   }
+  debug.finalize();
   std::string error;
   llvm::raw_string_ostream diagnostics(error);
   if (llvm::verifyModule(module, &diagnostics)) {

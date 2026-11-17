@@ -84,14 +84,20 @@ struct Runtime {
                                   CodeInvalidation,
                                   std::uint32_t) noexcept;
   InvalidateCode invalidate_code = nullptr;
+  std::uintptr_t view_base = 0;
 };
 
 static_assert(std::is_standard_layout_v<Runtime>);
 using Entry = void (*)(Runtime *);
 
+using TextRange = NativeSymbols::TextRange;
+using FaultSite = NativeSymbols::Site;
+
 struct Native {
   std::shared_ptr<const Image> image;
   std::vector<Entry> entries;
+  std::vector<FaultSite> fault_sites;
+  std::vector<TextRange> text_ranges;
   PreparationReport report;
   std::shared_ptr<const void> lifetime;
 };

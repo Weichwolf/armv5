@@ -18,6 +18,9 @@ struct Memory {
     std::span<std::byte> bytes;
     bool readable = true, writable = true, executable = false;
     Space space = Space::bus;
+    // Optional shared backing of bytes; lent descriptor stays open until rebind.
+    int mapping_fd = -1;
+    std::uint64_t mapping_offset = 0;
   };
 
   std::span<const Region> regions;

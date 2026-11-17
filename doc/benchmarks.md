@@ -1146,3 +1146,138 @@ armv5-e8278ccb5258ebc56aa3e884d70ce69798dfbd587845d725f793ed7b75c101af-llvm-19.1
 
 Published `src/` 5,281 (+0), `test/` 9,513 (+330). Flag liveness, CoreMark and
 final sanitizer qualification follow the memory implementation.
+
+## Direct host views (b2)
+
+Measured on 2026-11-17 on the same Linux x86-64 host, Clang/LLVM 19.1.7,
+Release, owner pinned to CPU 2. Each configuration warms once and reports the
+median of three complete, checked runs. No own compilation, analysis or test
+job ran alongside these counter windows. Other developer work on the host was
+not stopped. Exact and Direct use the same sparse 4 GiB geometry and original
+programs, numeric inputs and full-state/RAM oracles. `identity` enables Client
+AP3 sections; `remapped` inverts physical address bit 31, including code and
+table placement. The table and unused storage are checked outside measurement.
+
+Direct uses typed volatile guest accesses. `UNSOUND` below is a measurement-only
+copy with ordinary accesses, held outside the source tree and never shipped.
+It fails the independently authored optimized store/reload alias regression;
+passing the six kernels does not make that access form valid. Registers and
+flags remain ordinary SSA in the shipped implementation.
+
+| Mapping | Kernel | Exact I/GI | Direct I/GI | UNSOUND I/GI | Exact C/GI | Direct C/GI | UNSOUND C/GI |
+|---|---|---:|---:|---:|---:|---:|---:|
+| off | K1 | 8.330421 | 4.188867 | 4.215419 | 2.351647 | 1.194262 | 1.202971 |
+| off | K2 | 6.287619 | 3.313419 | 3.313419 | 1.672732 | 0.940260 | 0.940134 |
+| off | K3 | 5.585761 | 3.655587 | 3.655587 | 1.465053 | 0.961681 | 0.967412 |
+| off | K4 | 12.107183 | 9.321474 | 9.607189 | 3.006173 | 2.288186 | 2.370051 |
+| off | K5 | 8.007522 | 2.606944 | 2.606944 | 2.352578 | 0.703539 | 0.705354 |
+| off | K6 | 12.871918 | 9.061407 | 9.152802 | 4.179337 | 2.956723 | 2.983099 |
+| identity | K1 | 316.723005 | 4.171154 | 4.221301 | 118.146138 | 1.191400 | 1.202984 |
+| identity | K2 | 317.365513 | 3.553767 | 3.553767 | 126.289841 | 0.990496 | 0.989799 |
+| identity | K3 | 309.712973 | 3.675163 | 3.675163 | 124.083832 | 0.961975 | 0.971973 |
+| identity | K4 | 349.446507 | 9.464332 | 9.321475 | 136.418123 | 2.298956 | 2.292316 |
+| identity | K5 | 341.806156 | 2.606944 | 2.606944 | 123.181311 | 0.704049 | 0.703823 |
+| identity | K6 | 329.732068 | 9.037206 | 9.150412 | 123.415479 | 2.971972 | 2.969620 |
+| remapped | K1 | 332.074001 | 4.171154 | 4.221301 | 120.768762 | 1.191033 | 1.201792 |
+| remapped | K2 | 332.841852 | 3.553767 | 3.553767 | 130.406751 | 0.990225 | 0.989588 |
+| remapped | K3 | 325.282728 | 3.675163 | 3.675163 | 128.623494 | 0.961607 | 0.960919 |
+| remapped | K4 | 366.803654 | 9.464332 | 9.321475 | 141.351940 | 2.300271 | 2.289407 |
+| remapped | K5 | 361.805042 | 2.606944 | 2.606944 | 127.039678 | 0.703819 | 0.705285 |
+| remapped | K6 | 345.184547 | 9.037206 | 9.150412 | 126.476940 | 2.944385 | 2.975941 |
+
+Full Direct preparation/size and elapsed-time results follow. Text includes both
+Direct and Exact units, cold exits and bound continuations. Install time includes
+building the derived view and is separate from standalone LLVM preparation.
+The slowdown column compares the same algorithm in separately compiled Clang O3
+C++; no consumer throughput is inferred.
+
+| Mapping | Kernel | Retired GI | Guest M/s | Native / C++ time | LLVM preparation s | Install ms | Native text bytes | Bytes / prepared instruction |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| off | K1 | 88,867,584 | 3312.454 | 3.747x | 0.202938 | 0.032221 | 12,207 | 435.964 |
+| off | K2 | 61,080,320 | 4183.649 | 1.700x | 0.443046 | 0.029016 | 23,978 | 347.507 |
+| off | K3 | 19,822,080 | 4145.259 | 0.629x | 0.430565 | 0.031849 | 23,862 | 378.762 |
+| off | K4 | 14,680,064 | 1738.454 | 9.138x | 1.443080 | 0.028925 | 31,472 | 552.140 |
+| off | K5 | 10,488,320 | 5639.479 | 13.175x | 0.108082 | 0.026713 | 7,351 | 668.273 |
+| off | K6 | 88,935,668 | 1343.317 | 9.246x | 0.217204 | 0.027110 | 13,231 | 441.033 |
+| identity | K1 | 88,867,584 | 3314.304 | 3.745x | 0.403655 | 0.791963 | 34,447 | 1230.250 |
+| identity | K2 | 61,080,320 | 4003.832 | 1.809x | 0.995034 | 0.818820 | 79,657 | 1154.449 |
+| identity | K3 | 19,822,080 | 4135.789 | 0.630x | 0.886000 | 0.765948 | 74,111 | 1176.365 |
+| identity | K4 | 14,680,064 | 1729.665 | 9.229x | 2.397108 | 0.779795 | 98,971 | 1736.333 |
+| identity | K5 | 10,488,320 | 5660.507 | 13.487x | 0.192612 | 0.799755 | 19,421 | 1765.545 |
+| identity | K6 | 88,935,668 | 1334.719 | 9.309x | 0.430764 | 0.807956 | 37,903 | 1263.433 |
+| remapped | K1 | 88,867,584 | 3314.832 | 3.740x | 0.399581 | 0.810712 | 34,447 | 1230.250 |
+| remapped | K2 | 61,080,320 | 3953.041 | 1.778x | 0.983628 | 0.782932 | 79,657 | 1154.449 |
+| remapped | K3 | 19,822,080 | 4143.516 | 0.630x | 0.878320 | 0.793132 | 74,111 | 1176.365 |
+| remapped | K4 | 14,680,064 | 1732.607 | 9.442x | 2.347236 | 0.786573 | 98,971 | 1736.333 |
+| remapped | K5 | 10,488,320 | 5635.173 | 13.578x | 0.192320 | 0.815218 | 19,421 | 1765.545 |
+| remapped | K6 | 88,935,668 | 1348.748 | 9.210x | 0.429883 | 0.780258 | 37,903 | 1263.433 |
+
+All six Direct kernels use fewer host instructions and host cycles than the
+published b1 guarded 4 GiB baseline. K4 changes from 13.178610 to 9.321474 I/GI
+with M off. Current Exact results also differ from b1: the normal benchmark
+now lends the whole low code region and uses the current lowering and native
+layout. The table above compares Exact and Direct in identical current geometry;
+the preceding b1 table remains the published baseline.
+
+### Native memory attribution
+
+Native stepping of the same 16-iteration K4 prefix (224 retired GI) gives the
+following counts. Helper instruction counts include nested calls and exclude
+native argument setup. These short traces include initial TLB fills and are
+attribution evidence, not replacements for the steady counter measurements.
+
+| Mapping / mode | All traced host instructions | Native unit instructions | Fetch helper instructions | Data helper instructions | Fetch / data helper calls |
+|---|---:|---:|---:|---:|---:|
+| identity / exact | 79,016 | 8,577 | 49,020 | 21,280 | 224 / 48 |
+| identity / direct | 2,440 | 2,288 | 0 | 0 | 0 / 0 |
+| remapped / exact | 82,915 | 8,577 | 51,495 | 22,704 | 224 / 48 |
+| remapped / direct | 2,440 | 2,288 | 0 | 0 | 0 / 0 |
+
+Both Direct traces execute exactly 48 native guest RAM transactions. There are
+no range/store-safety comparisons or descriptor-bias loads at those accesses:
+the identified b1 admission/bias cost is absent. Guest address arithmetic,
+alignment/rotation, actual accesses, view-base retention/reloads and spills
+still cost instructions. The Exact MMU helper subtotal is 313.839286 I/GI for
+identity and 331.245536 for remapping; Direct eliminates these calls. This
+subtotal excludes native call setup and is not total memory cost. The unchanged
+warm Direct entry adapter previously measured 49 entry plus 10 exit instructions
+per native invocation, excluding guest body and caller, with zero successful-entry
+signal-mask system calls.
+
+### Qualification and regime
+
+One benchmark executable replaces the earlier ordinary/mapped duplicates.
+Generic fixtures cover sections, coarse/fine large and small pages, tiny and
+subpage Exact fallback, domains/AP, FCSE, privilege and forced-user transfers,
+TLB lockdown and retained stale translations, snapshot requalification, TCM
+routing/protection, shared-file executable aliases, guest PTE writes followed
+by TLB invalidation and declared reinstall, and terminal native faults including
+PC zero and dead loads. An independent consumer links and binds real executable
+ranges and line tables and proves that metadata is copied. ARM/Thumb block,
+doubleword, endian, signed, swap and legacy-rotation cases use installed images.
+Optimized real-alias store/reload, variable 32-bit wrap and shifted-copy tests
+retain independent numerical oracles.
+
+The source-only export passes all eight test registrations (223.88 s), followed
+by the final added remap fixture through the core suite (28.24 s). Configured
+clang-tidy and clang-format pass. A separately built installed-SDK consumer
+passes independent artifact load, LLVM linking, metadata-copy validation and a
+real terminal fault with a nonzero variant, using only the two installed public
+headers. No manufacturer bytes or manuals are build/test inputs.
+
+Current Direct eligibility uses one privilege-class view. Other privilege,
+unexpressible host-page geometry, incompatible retained translations, tiny or
+subpage mappings, unreadable prepared code and active lockdown filling use
+Exact; forced-user accesses retain Exact helpers. Registered Io or linked
+callback roles conservatively select Exact for the image. Resumable native-fault
+I/O is not implemented. Fatal Direct faults report diagnostics only and disable
+the instance. Cross-unit flag liveness, CoreMark, final own/generated-code
+sanitizer qualification and macOS ARM64 remain open.
+
+Preparation/compiler identity:
+
+```text
+armv5-166f28a081154b1dd19fb6cac70ce2b6e01069e25a47e9720cc97ac4532236b0-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Published `src/` 6,156 (+875), `test/` 11,092 (+1,579).

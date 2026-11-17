@@ -2,11 +2,13 @@
 #include "armv5/core.hpp"
 
 #include "armv5/memory.hpp"
+#include "escape.hpp"
 #include "identity.hpp"
 #include "image.hpp"
 #include "mmu.hpp"
 #include "runtime.hpp"
 #include "system.hpp"
+#include "view.hpp"
 
 #include <algorithm>
 #include <array>
@@ -14,12 +16,17 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ios>
 #include <limits>
 #include <memory>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -99,7 +106,8 @@ struct Core::Impl {
   Io io;
   std::uint64_t generation = 0;
   State continuation;
-  bool running = false, external_entry = true, revoked = false;
+  bool running = false, external_entry = true, revoked = false, poisoned = false;
+  detail::Escape escape;
   std::shared_ptr<const detail::Native> binding;
   std::size_t variant_index = 0;
   std::uint32_t revocation_address = 0;
@@ -108,6 +116,23 @@ struct Core::Impl {
   std::vector<HostRange> code_ranges;
   std::string identity, pending_image;
   detail::Mmu mmu;
+  detail::View view;
+  bool view_ready = false, view_privileged = true;
+
+  struct Backing {
+    dev_t device;
+    ino_t inode;
+    int descriptor;
+  };
+
+  std::vector<Backing> backings;
+
+  struct BackingRange {
+    int descriptor;
+    std::uint64_t first, end;
+  };
+
+  std::vector<BackingRange> code_backings, protected_backings;
 
   struct CodeBinding {
     std::uint32_t address, physical, size;
@@ -127,6 +152,7 @@ struct Core::Impl {
 
   void stopped() const {
     if (running) { throw std::logic_error("Core mutation/execution reentry from callback"); }
+    if (poisoned) { throw std::logic_error("Core is unusable after a fatal Direct host fault"); }
   }
 
   static std::size_t saved_index(std::uint32_t mode) {
@@ -268,6 +294,7 @@ struct Core::Impl {
         runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
         return true;
       case detail::Signal::redispatch:
+        reconcile_view();
         runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
         return true;
       case detail::Signal::software_interrupt:
@@ -303,13 +330,43 @@ struct Core::Impl {
     }
   }
 
+  [[nodiscard]] Backing shared_backing(const Memory::Region &region) const {
+    if (region.mapping_fd < -1 || (region.mapping_fd < 0 && region.mapping_offset != 0)) {
+      throw std::invalid_argument("invalid shared memory backing declaration");
+    }
+    Backing backing{.device = 0, .inode = 0, .descriptor = region.mapping_fd};
+    if (region.mapping_fd >= 0) {
+      struct stat status{};
+      if (fstat(region.mapping_fd, &status) != 0 || status.st_size < 0 ||
+          region.mapping_offset > static_cast<std::uint64_t>(status.st_size) ||
+          region.bytes.size() >
+              static_cast<std::uint64_t>(status.st_size) - region.mapping_offset) {
+        throw std::invalid_argument("shared memory backing does not cover lent bytes");
+      }
+      backing.device = status.st_dev;
+      backing.inode = status.st_ino;
+      for (const auto &prior : backings) {
+        if (prior.descriptor >= 0 && prior.device == backing.device &&
+            prior.inode == backing.inode) {
+          backing.descriptor = prior.descriptor;
+          break;
+        }
+      }
+    }
+    return backing;
+  }
+
   void rebind(Memory memory) {
     stopped();
     binding.reset();
     direct.clear();
     code_ranges.clear();
     code_bindings.clear();
+    code_backings.clear();
     runtime.direct = nullptr;
+    view.clear();
+    view_ready = false;
+    backings.clear();
     regions.assign(memory.regions.begin(), memory.regions.end());
     std::ranges::sort(regions, [](const Memory::Region &first, const Memory::Region &second) {
       return std::pair{first.space, first.address} < std::pair{second.space, second.address};
@@ -345,6 +402,7 @@ struct Core::Impl {
           runtime.tcm_status |= 0x10000;
         }
       }
+      backings.push_back(shared_backing(region));
       end = region.address + region.bytes.size();
     }
     generation = memory.generation;
@@ -389,8 +447,29 @@ struct Core::Impl {
   [[nodiscard]] bool code_overlap(std::span<const std::byte> bytes) const {
     const HostRange access{.address = reinterpret_cast<std::uintptr_t>(bytes.data()),
                            .size = bytes.size()};
-    return std::ranges::any_of(code_ranges,
-                               [access](HostRange code) { return overlaps(access, code); });
+    if (std::ranges::any_of(code_ranges,
+                            [access](HostRange code) { return overlaps(access, code); })) {
+      return true;
+    }
+    for (std::size_t index = 0; index < regions.size(); ++index) {
+      const auto &mapping = regions[index];
+      if (mapping.mapping_fd < 0) { continue; }
+      const HostRange storage{.address = reinterpret_cast<std::uintptr_t>(mapping.bytes.data()),
+                              .size = mapping.bytes.size()};
+      if (!overlaps(access, storage)) { continue; }
+      const auto first =
+          mapping.mapping_offset + std::max(access.address, storage.address) - storage.address;
+      const auto end = mapping.mapping_offset +
+                       std::min(access.address + access.size, storage.address + storage.size) -
+                       storage.address;
+      if (std::ranges::any_of(code_backings, [&](const BackingRange &code) {
+            return code.descriptor == backings[index].descriptor && first < code.end &&
+                   code.first < end;
+          })) {
+        return true;
+      }
+    }
+    return false;
   }
 
   struct CallbackAccess {
@@ -477,6 +556,7 @@ struct Core::Impl {
                               unsigned operation,
                               std::uint32_t value,
                               std::uintptr_t replacement) noexcept {
+    const detail::Escape::Suspend suspension;
     auto &owner = *static_cast<Impl *>(runtime->owner);
     return owner.transaction({.address = address,
                               .width = width,
@@ -548,6 +628,7 @@ struct Core::Impl {
                               std::uint32_t operand,
                               detail::Runtime::CodeInvalidation operation,
                               std::uint32_t pc) noexcept {
+    const detail::Escape::Suspend suspension;
     auto &owner = *static_cast<Impl *>(runtime->owner);
     constexpr std::uint32_t line_mask = 0xffffffe0;
     constexpr std::uint32_t set_mask = 0xfe0; // c0: 16KB ICache, four ways, 32-byte lines.
@@ -582,6 +663,7 @@ struct Core::Impl {
                                       unsigned count,
                                       detail::Runtime::Privilege privilege,
                                       detail::Runtime::Callbacks callbacks) noexcept {
+    const detail::Escape::Suspend suspension;
     auto &owner = *static_cast<Impl *>(runtime->owner);
     const auto width = static_cast<unsigned>(access_width);
     const auto page_read = static_cast<std::uintptr_t>(page_callback);
@@ -646,6 +728,7 @@ struct Core::Impl {
                              unsigned mode,
                              detail::Runtime::PageCallback page_callback,
                              detail::Runtime::Callbacks callbacks) noexcept {
+    const detail::Escape::Suspend suspension;
     auto &owner = *static_cast<Impl *>(runtime->owner);
     const auto width = static_cast<unsigned>(access_width);
     const auto page_read = static_cast<std::uintptr_t>(page_callback);
@@ -687,6 +770,7 @@ struct Core::Impl {
 
   static void
   invalidate(detail::Runtime *runtime, std::uint32_t address, unsigned single) noexcept {
+    const detail::Escape::Suspend suspension;
     static_cast<Impl *>(runtime->owner)->mmu.invalidate(single != 0, address);
   }
 
@@ -740,7 +824,8 @@ struct Core::Impl {
       const auto *mapping = region(layout.address, 1, layout.space);
       if (mapping == nullptr || mapping->address != layout.address ||
           mapping->bytes.size() != layout.size || mapping->readable != layout.readable ||
-          mapping->writable != layout.writable || mapping->executable != layout.executable) {
+          mapping->writable != layout.writable || mapping->executable != layout.executable ||
+          (layout.shared_mapping && mapping->mapping_fd < 0)) {
         detail::refuse(identity, layout.address, "memory layout differs from prepared declaration");
       }
       const auto base =
@@ -753,6 +838,213 @@ struct Core::Impl {
            .safe_write = unsigned(mapping->writable && !code_overlap(mapping->bytes))});
     }
     runtime.direct = direct.data();
+  }
+
+  struct ViewPlan {
+    Impl *owner;
+    detail::Mmu fresh, cached;
+    Registers::System system;
+    bool privileged;
+
+    static std::uint64_t retained_boundary(std::span<const detail::Mmu::Entry> entries,
+                                           std::uint32_t mva,
+                                           std::uint64_t available) {
+      for (const auto &entry : entries) {
+        if (entry.size == 0) { continue; }
+        if (entry.virtual_base > mva) {
+          available = std::min(available, std::uint64_t(entry.virtual_base - mva));
+        } else if (mva - entry.virtual_base < entry.size) {
+          available = std::min(available, std::uint64_t(entry.size - (mva - entry.virtual_base)));
+        }
+      }
+      return available;
+    }
+
+    static bool same(const detail::Mmu::Translation &first,
+                     const detail::Mmu::Translation &second) {
+      return std::tie(
+                 first.status, first.physical, first.fault_status, first.attributes, first.tiny) ==
+             std::tie(second.status,
+                      second.physical,
+                      second.fault_status,
+                      second.attributes,
+                      second.tiny);
+    }
+
+    detail::View::Piece virtual_piece(std::uint32_t address) {
+      std::uint32_t physical = address;
+      auto available = detail::View::size - address;
+      bool readable = true;
+      bool writable = true;
+      if ((system.mapping.control & 1) != 0) {
+        TableReader reader{.owner = owner, .replacement = 0, .callbacks = false};
+        available = 0;
+        for (const bool writing : {false, true}) {
+          const detail::Mmu::Access access{
+              .privileged = privileged, .writing = writing, .commit = false};
+          const auto current =
+              fresh.translate(system, address, access, &TableReader::read, &reader);
+          const auto retained =
+              cached.translate(system, address, access, &TableReader::read, &reader);
+          if (!same(current, retained) || current.tiny ||
+              (current.status != detail::Mmu::Status::ready &&
+               current.status != detail::Mmu::Status::fault)) {
+            return {.exact = true};
+          }
+          const bool allowed = current.status == detail::Mmu::Status::ready;
+          (writing ? writable : readable) = allowed;
+          if (current.available != 0) {
+            available = available == 0 ? current.available
+                                       : std::min(available, std::uint64_t(current.available));
+          }
+          if (allowed) { physical = current.physical; }
+        }
+        if (available == 0) { available = 1024 - (address & (1024 - 1)); }
+        const auto mva = detail::Mmu::modified(system.mapping, address);
+        available = retained_boundary(cached.locked, mva, available);
+        available = retained_boundary(cached.normal, mva, available);
+      }
+      return {.size = available, .offset = physical, .readable = readable, .writable = writable};
+    }
+
+    detail::View::Piece translated(std::uint32_t address) {
+      const auto piece = virtual_piece(address);
+      if (piece.exact || (!piece.readable && !piece.writable)) { return piece; }
+      auto &core = *owner;
+      const auto physical = static_cast<std::uint32_t>(piece.offset);
+      auto available = piece.size;
+      bool readable = piece.readable;
+      bool writable = piece.writable;
+      const auto storage = core.storage_address(physical, false);
+      available = std::min(available, storage.available);
+      const auto *region = core.region(storage.relative, 1, storage.space);
+      if (region == nullptr) {
+        for (const auto &next : core.regions) {
+          if (next.space == storage.space && next.address > storage.relative) {
+            available = std::min(available, std::uint64_t(next.address - storage.relative));
+          }
+        }
+        return {.size = available};
+      }
+      const auto relative = storage.relative - region->address;
+      available = std::min(available, region->bytes.size() - relative);
+      readable &= region->readable;
+      writable &= region->writable;
+      if (!readable && !writable) { return {.size = available}; }
+      const auto index = static_cast<std::size_t>(region - core.regions.data());
+      const auto descriptor = core.backings[index].descriptor;
+      if (descriptor < 0) { return {.exact = true}; }
+      const auto offset = region->mapping_offset + relative;
+      for (const auto &code : core.protected_backings) {
+        if (code.descriptor != descriptor || offset >= code.end) { continue; }
+        if (offset >= code.first) {
+          writable = false;
+          available = std::min(available, code.end - offset);
+        } else {
+          available = std::min(available, code.first - offset);
+        }
+      }
+      return {.size = available,
+              .offset = offset,
+              .descriptor = descriptor,
+              .readable = readable,
+              .writable = writable};
+    }
+
+    static detail::View::Piece resolve(void *context, std::uint32_t address) {
+      return static_cast<ViewPlan *>(context)->translated(address);
+    }
+  };
+
+  void collect_code_backings() {
+    code_backings.clear();
+    for (std::size_t index = 0; index < regions.size(); ++index) {
+      const auto &region = regions[index];
+      if (region.mapping_fd < 0) { continue; }
+      const HostRange storage{.address = reinterpret_cast<std::uintptr_t>(region.bytes.data()),
+                              .size = region.bytes.size()};
+      for (const auto code : code_ranges) {
+        if (!overlaps(code, storage)) { continue; }
+        const auto first =
+            region.mapping_offset + std::max(code.address, storage.address) - storage.address;
+        const auto end = region.mapping_offset +
+                         std::min(code.address + code.size, storage.address + storage.size) -
+                         storage.address;
+        code_backings.push_back(
+            {.descriptor = backings[index].descriptor, .first = first, .end = end});
+      }
+    }
+  }
+
+  void build_view(const detail::Image &image, const detail::Variant &variant) {
+    view.clear();
+    view_ready = false;
+    protected_backings.clear();
+    runtime.view_base = 0;
+    if (image.options.memory_mode != CompileOptions::MemoryMode::direct ||
+        (runtime.system.tlb_lockdown & 1) != 0 || io.read != nullptr || io.write != nullptr ||
+        io.swap != nullptr || !image.options.callbacks.empty()) {
+      return;
+    }
+    for (const auto &region : regions) {
+      if (std::ranges::none_of(variant.layout, [&](const RegionLayout &layout) {
+            return layout.address == region.address && layout.space == region.space &&
+                   layout.shared_mapping;
+          })) {
+        return;
+      }
+    }
+    const auto page = detail::View::page_size();
+    for (const auto &code : code_backings) {
+      protected_backings.push_back({.descriptor = code.descriptor,
+                                    .first = code.first / page * page,
+                                    .end = (code.end + page - 1) / page * page});
+    }
+    view_privileged = (runtime.cpsr & mode_bits) != detail::user_mode;
+    ViewPlan plan{.owner = this,
+                  .fresh = {},
+                  .cached = mmu,
+                  .system = runtime.system,
+                  .privileged = view_privileged};
+    view_ready = view.build(&ViewPlan::resolve, &plan);
+    for (const auto &span : variant.spans) {
+      if (!view_ready) { break; }
+      for (std::size_t offset = 0; offset < span.bytes.size();) {
+        const auto piece = plan.translated(span.address + static_cast<std::uint32_t>(offset));
+        if (piece.exact || !piece.readable) {
+          view_ready = false;
+          break;
+        }
+        offset += std::min(piece.size, span.bytes.size() - offset);
+      }
+    }
+    if (!view_ready) { view.clear(); }
+    runtime.view_base = view.base();
+  }
+
+  void select_entries() {
+    mode_entries.fill(nullptr);
+    const auto &units = binding->image->units;
+    for (std::size_t index = 0; index < units.size(); ++index) {
+      const bool selected_direct =
+          view_ready && ((units[index].mode != detail::user_mode) == view_privileged);
+      if (units[index].variant == variant_index && units[index].direct == selected_direct) {
+        mode_entries[units[index].mode | (units[index].thumb ? thumb_bit : 0)] =
+            binding->entries[index];
+      }
+    }
+  }
+
+  void reconcile_view() {
+    if (binding->image->options.memory_mode != CompileOptions::MemoryMode::direct) { return; }
+    if ((runtime.system.tlb_lockdown & 1) != 0) {
+      view.clear();
+      view_ready = false;
+      runtime.view_base = 0;
+    } else if (!view_ready) {
+      build_view(*binding->image, binding->image->variants[variant_index]);
+    }
+    select_entries();
   }
 
   [[nodiscard]] State inspect() const {
@@ -838,6 +1130,41 @@ struct Core::Impl {
     }
   }
 
+  bool invoke(detail::Entry entry) {
+    const bool direct_mode =
+        view_ready && ((runtime.cpsr & mode_bits) != detail::user_mode) == view_privileged;
+    if (direct_mode) {
+      if (!escape.invoke(entry, runtime, binding->text_ranges, runtime.view_base)) {
+        const auto fault = escape.fault();
+        poisoned = true;
+        const auto site =
+            std::ranges::find_if(binding->fault_sites, [&](const detail::FaultSite &candidate) {
+              return candidate.variant == binding->image->variants[variant_index].id &&
+                     fault.native_pc - candidate.address < candidate.size;
+            });
+        std::ostringstream reason;
+        reason << "fatal Direct " << (fault.writing ? "write" : "read");
+        if (site == binding->fault_sites.end()) {
+          reason << " at native PC 0x" << std::hex << fault.native_pc << " (guest PC unavailable)";
+        } else {
+          reason << " at guest PC 0x" << std::hex << site->guest_pc;
+        }
+        reason << "; architectural state and progress unavailable; discard Core";
+        failure(Fault::Kind::memory, fault.address, reason.str());
+        if (site != binding->fault_sites.end()) { continuation.fault.variant = site->variant; }
+        return false;
+      }
+    } else {
+      entry(&runtime);
+    }
+    return true;
+  }
+
+  [[nodiscard]] detail::Entry current_entry() const {
+    return (runtime.cpsr & jazelle_bit) == 0 ? mode_entries[runtime.cpsr & (mode_bits | thumb_bit)]
+                                             : nullptr;
+  }
+
   RunResult execute(std::uint64_t instructions, std::uint64_t deadline) {
     stopped();
     const Progress before{.instructions = runtime.instructions, .base_cycles = runtime.cycles};
@@ -881,13 +1208,13 @@ struct Core::Impl {
     revoked = false;
     running = true;
     do {
-      const auto entry = mode_entries[runtime.cpsr & (mode_bits | thumb_bit)];
-      if (entry == nullptr || (runtime.cpsr & jazelle_bit) != 0) {
+      const auto entry = current_entry();
+      if (entry == nullptr) {
         runtime.signal = static_cast<std::uint32_t>(detail::Signal::unsupported);
         runtime.address = runtime.r[15];
         break;
       }
-      entry(&runtime);
+      if (!invoke(entry)) { break; }
       const bool resume = internal_event();
       if (revoked || !resume) { break; }
     } while (
@@ -910,6 +1237,10 @@ struct Core::Impl {
 Core::Core(Memory memory, Io io) : impl_(std::make_unique<Impl>(memory, io)) {}
 
 Core::~Core() = default;
+
+bool Core::host_fault(std::uintptr_t address, bool writing, std::uintptr_t native_pc) noexcept {
+  return detail::Escape::host_fault(address, writing, native_pc);
+}
 
 std::string_view Core::compiler_identity() noexcept {
   return detail::compiler_identity;
@@ -955,6 +1286,7 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
   impl_->direct.clear();
   impl_->code_ranges.clear();
   impl_->code_bindings.clear();
+  impl_->code_backings.clear();
   impl_->runtime.direct = nullptr;
   impl_->identity = image.impl_->image->identity;
   const auto &variants = image.impl_->image->variants;
@@ -985,21 +1317,19 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
                    "CP15 memory-control behavior is not implemented for this configuration yet");
   }
   impl_->validate_code(*found);
+  impl_->collect_code_backings();
   impl_->validate_layout(*found);
+  impl_->build_view(*image.impl_->image, *found);
   impl_->binding = image.impl_;
   impl_->variant_index = static_cast<std::size_t>(found - variants.begin());
-  impl_->mode_entries.fill(nullptr);
-  const auto &units = image.impl_->image->units;
-  for (std::size_t index = 0; index < units.size(); ++index) {
-    if (units[index].variant == impl_->variant_index) {
-      impl_->mode_entries[units[index].mode | (units[index].thumb ? thumb_bit : 0)] =
-          image.impl_->entries[index];
-    }
-  }
+  impl_->select_entries();
   return image.report();
 }
 
 Registers Core::registers() const {
+  if (impl_->poisoned) {
+    throw std::logic_error("register state unavailable after fatal Direct fault");
+  }
   return {.r = impl_->runtime.r,
           .cpsr = impl_->runtime.cpsr,
           .spsr = impl_->runtime.spsr,
@@ -1026,10 +1356,14 @@ void Core::set_registers(const Registers &registers) {
     impl_->runtime.direct = nullptr;
   }
   impl_->runtime.system = system;
+  if (impl_->binding) { impl_->reconcile_view(); }
   impl_->external_entry = true;
 }
 
 State Core::state() const {
+  if (impl_->poisoned) {
+    throw std::logic_error("processor state unavailable after fatal Direct fault");
+  }
   return impl_->inspect();
 }
 
@@ -1067,6 +1401,12 @@ void Core::restore(const Snapshot &snapshot) {
   impl_->runtime.instructions = snapshot.impl_->state.progress.instructions;
   impl_->runtime.cycles = snapshot.impl_->state.progress.base_cycles;
   impl_->runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+  if (impl_->binding &&
+      impl_->binding->image->options.memory_mode == CompileOptions::MemoryMode::direct) {
+    const auto variant = impl_->binding->image->variants[impl_->variant_index].id;
+    const NativeImage native(std::static_pointer_cast<const NativeImage::Impl>(impl_->binding));
+    (void)install(native, variant);
+  }
 }
 
 void Core::set_memory(Memory memory) {

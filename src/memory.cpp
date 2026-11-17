@@ -13,12 +13,16 @@
 #include <cstdint>
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalValue.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/Alignment.h>
+#include <llvm/Support/AtomicOrdering.h>
+#include <llvm/Support/Casting.h>
 #include <utility>
 #include <vector>
 
@@ -141,7 +145,10 @@ llvm::Value *Lowering::virtual_access(
 }
 
 void Lowering::fetch_instruction(Values &values, llvm::Value *address, unsigned width) {
-  if ((variant_.mapping.control & 1) == 0) { return; }
+  if ((variant_.mapping.control & 1) == 0 ||
+      (direct_mode_ && llvm::isa<llvm::ConstantInt>(address))) {
+    return;
+  }
   auto *type = llvm::FunctionType::get(ir_.getInt32Ty(),
                                        {ir_.getPtrTy(),
                                         ir_.getInt32Ty(),
@@ -208,8 +215,16 @@ Lowering::layout_contains(const RegionLayout &region, llvm::Value *address, unsi
   return within;
 }
 
+bool Lowering::use_view() const {
+  const auto &instruction = code_[indices_.at(emitting_pc_)];
+  const bool user_transfer =
+      instruction.operation == Operation::single && (instruction.word & 0x01200000) == 0x00200000;
+  return direct_mode_ && !user_transfer;
+}
+
 llvm::Value *Lowering::access(
     Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value) {
+  if (use_view()) { return view_access(address, width, operation, value); }
   if (operation == 2 || variant_.layout.empty() || (variant_.mapping.control & 1) != 0) {
     return slow_access(values, address, width, operation, value);
   }
@@ -278,6 +293,44 @@ llvm::Value *Lowering::access(
   ir_.SetInsertPoint(merged);
   pending_signal_ = signal;
   return result;
+}
+
+llvm::Value *Lowering::view_access(llvm::Value *address,
+                                   unsigned width,
+                                   unsigned operation,
+                                   llvm::Value *value) {
+  auto *pointer = ir_.CreateIntToPtr(
+      ir_.CreateAdd(view_base_, ir_.CreateZExt(address, ir_.getInt64Ty())), ir_.getPtrTy());
+  auto *type = ir_.getIntNTy(width * 8);
+  const bool swap_endian =
+      ((variant_.mapping.control & 0x80) != 0) != (std::endian::native == std::endian::big);
+  llvm::Value *stored = ir_.CreateTruncOrBitCast(value, type);
+  if (operation != 0 && swap_endian && width > 1) {
+    stored = ir_.CreateIntrinsic(llvm::Intrinsic::bswap, {type}, {stored});
+  }
+  llvm::Value *loaded = c32(0);
+  if (operation == 0) {
+    auto *read = ir_.CreateAlignedLoad(type, pointer, llvm::Align(1));
+    read->setVolatile(true);
+    loaded = read;
+  } else if (operation == 1) {
+    auto *write = ir_.CreateAlignedStore(stored, pointer, llvm::Align(1));
+    write->setVolatile(true);
+  } else {
+    // The owner transaction is indivisible with respect to callbacks. Guest
+    // alignment has already selected an aligned byte/word native transaction.
+    auto *atomic = ir_.CreateAtomicRMW(llvm::AtomicRMWInst::Xchg,
+                                       pointer,
+                                       stored,
+                                       llvm::MaybeAlign(width),
+                                       llvm::AtomicOrdering::SequentiallyConsistent);
+    atomic->setVolatile(true);
+    loaded = atomic;
+  }
+  if (operation != 1 && swap_endian && width > 1) {
+    loaded = ir_.CreateIntrinsic(llvm::Intrinsic::bswap, {type}, {loaded});
+  }
+  return ir_.CreateZExtOrTrunc(loaded, ir_.getInt32Ty());
 }
 
 void Lowering::external_abort(llvm::Value *address) {

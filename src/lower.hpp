@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
@@ -91,7 +92,9 @@ public:
            llvm::Module &module,
            const std::string &name,
            std::uint32_t mode,
-           bool thumb);
+           bool thumb,
+           bool direct,
+           llvm::DIBuilder &debug);
   void emit();
 
 private:
@@ -102,10 +105,14 @@ private:
   llvm::IRBuilder<> ir_;
   llvm::Function *function_;
   std::uint32_t mode_;
-  bool thumb_;
+  bool thumb_, direct_mode_;
   bool admitted_path_ = false;
   std::uint32_t emitting_pc_ = 0;
   llvm::Value *runtime_, *instruction_bound_{nullptr}, *cycle_bound_{nullptr}, *direct_{nullptr};
+  llvm::Value *view_base_ = nullptr;
+  [[nodiscard]] bool use_view() const;
+  llvm::Value *
+  view_access(llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value);
   llvm::Value *pending_signal_ = nullptr, *abort_base_ = nullptr;
   unsigned abort_register_ = 0, access_count_ = 1;
   llvm::Value *access_first_ = nullptr;

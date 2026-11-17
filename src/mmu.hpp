@@ -25,12 +25,13 @@ struct Mmu {
     Status status = Status::ready;
     std::uint32_t mva = 0, physical = 0, available = 0, fault_status = 0, fault_address = 0;
     std::uint32_t attributes = 0;
+    bool tiny = false;
   };
 
   struct Entry {
     std::uint32_t virtual_base = 0, physical_base = 0, size = 0;
     std::uint8_t domain = 0, permission = 0, attributes = 0;
-    bool section = false;
+    bool section = false, tiny = false;
   };
 
   // The normal TLB's placement/replacement is outside the programmer's model.

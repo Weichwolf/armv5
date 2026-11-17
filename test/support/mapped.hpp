@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -54,6 +55,15 @@ public:
 
   [[nodiscard]] std::span<std::byte> data() const {
     return {base_ + data_address, size - data_address};
+  }
+
+  [[nodiscard]] int descriptor() const { return file_; }
+
+  [[nodiscard]] std::span<std::byte> code_storage() const {
+    if (mprotect(base_, data_address, PROT_READ) != 0) {
+      throw std::system_error(errno, std::generic_category(), "protect complete code storage");
+    }
+    return {base_, data_address};
   }
 
   void verify_tail(std::size_t used) const {
@@ -113,6 +123,7 @@ private:
 class MappedMachine {
 public:
   enum class Preparation : std::uint8_t { deferred, immediate };
+  static constexpr auto default_mode = armv5::CompileOptions::MemoryMode::exact;
   AddressSpace space_;
   std::pmr::monotonic_buffer_resource allocation_{
       space_.data().data(), space_.data().size(), std::pmr::null_memory_resource()};
@@ -122,25 +133,33 @@ public:
   std::vector<armv5::Memory::Region> regions_;
   std::vector<armv5::RegionLayout> layout_;
   bool fixed_;
+  armv5::CompileOptions options_;
+  std::optional<armv5::Registers::System::Mapping> mapping_;
   std::optional<armv5::NativeImage> native_;
+  double installation_seconds = 0;
 
   // Copy construction uses the default resource, preserving independent RAM oracles.
   std::pmr::vector<std::byte> ram{&allocation_};
   std::unique_ptr<armv5::Core> core;
 
-  explicit MappedMachine(const fixture::Program &program, std::size_t ram_size = 0x10000)
+  explicit MappedMachine(const fixture::Program &program,
+                         std::size_t ram_size = 0x10000,
+                         armv5::CompileOptions::MemoryMode mode = default_mode)
       : MappedMachine(
-            {{.program = program, .modes = {}}}, {}, true, ram_size, Preparation::deferred) {}
+            {{.program = program, .modes = {}}}, {}, true, ram_size, Preparation::deferred, mode) {}
 
   MappedMachine(std::vector<fixture::ModeProgram> programs,
                 std::vector<std::uint32_t> vectors,
                 bool fixed,
-                std::size_t ram_size)
-      : MappedMachine(
-            std::move(programs), std::move(vectors), fixed, ram_size, Preparation::immediate) {}
+                std::size_t ram_size,
+                armv5::CompileOptions::MemoryMode mode = default_mode,
+                Preparation preparation = Preparation::immediate)
+      : MappedMachine(std::move(programs), std::move(vectors), fixed, ram_size, preparation, mode) {
+  }
 
   void prepare() {
-    const std::array variants{armv5::CodeVariant{.id = 0, .spans = spans_, .entries = entries_}};
+    const std::array variants{
+        armv5::CodeVariant{.id = 0, .spans = spans_, .entries = entries_, .mapping = mapping_}};
     const std::array layouts{armv5::VariantLayout{.variant = 0, .regions = layout_}};
     const armv5::CodeImage image{.identity = "authored-full-space-benchmark",
                                  .variants = variants,
@@ -148,8 +167,15 @@ public:
                                                    : std::span<const armv5::VariantLayout>{},
                                  .transitions = {},
                                  .interrupt_vectors = vectors_};
-    native_.emplace(armv5::Core::compile(image));
-    (void)core->install(*native_, 0);
+    native_.emplace(armv5::Core::compile(image, options_));
+    install();
+  }
+
+  void install() {
+    const auto start = std::chrono::steady_clock::now();
+    (void)core->install(prepared(), 0);
+    installation_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   }
 
   [[nodiscard]] const armv5::NativeImage &prepared() const {
@@ -172,8 +198,10 @@ private:
                 std::vector<std::uint32_t> vectors,
                 bool fixed,
                 std::size_t ram_size,
-                Preparation preparation)
+                Preparation preparation,
+                armv5::CompileOptions::MemoryMode mode)
       : programs_(std::move(programs)), vectors_(std::move(vectors)), fixed_(fixed) {
+    options_.memory_mode = mode;
     ram.resize(ram_size);
     for (const auto &item : programs_) {
       spans_.push_back({.address = item.program.address(),
@@ -181,19 +209,35 @@ private:
                         .processor_modes = item.modes,
                         .instruction_set = item.instruction_set});
       entries_.push_back(item.program.address());
-      regions_.push_back({.address = item.program.address(),
-                          .bytes = space_.code(item.program),
-                          .readable = true,
-                          .writable = false,
-                          .executable = true});
+      auto bytes = space_.code(item.program);
+      if (mode == armv5::CompileOptions::MemoryMode::exact) {
+        regions_.push_back({.address = item.program.address(),
+                            .bytes = bytes,
+                            .readable = true,
+                            .writable = false,
+                            .executable = true});
+      }
     }
     regions_.push_back({.address = AddressSpace::data_address, .bytes = space_.data()});
+    if (mode == armv5::CompileOptions::MemoryMode::direct) {
+      regions_.insert(regions_.begin(),
+                      {.address = 0,
+                       .bytes = space_.code_storage(),
+                       .readable = true,
+                       .writable = false,
+                       .executable = true});
+      for (auto &region : regions_) {
+        region.mapping_fd = space_.descriptor();
+        region.mapping_offset = region.address;
+      }
+    }
     for (const auto &region : regions_) {
       layout_.push_back({.address = region.address,
                          .size = region.bytes.size(),
                          .readable = region.readable,
                          .writable = region.writable,
-                         .executable = region.executable});
+                         .executable = region.executable,
+                         .shared_mapping = region.mapping_fd >= 0});
     }
     core = std::make_unique<armv5::Core>(armv5::Memory{.regions = regions_, .generation = 0});
     auto registers = core->registers();

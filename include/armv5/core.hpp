@@ -54,6 +54,7 @@ struct Fault {
   Kind kind = Kind::none;
   std::uint32_t address = 0;
   std::string identity, reason;
+  std::uint64_t variant = 0;
   bool operator==(const Fault &) const = default;
 };
 
@@ -110,6 +111,7 @@ struct RegionLayout {
   std::uint64_t size = 0;
   bool readable = true, writable = false, executable = false;
   Memory::Space space = Memory::Space::bus;
+  bool shared_mapping = false;
 };
 
 struct VariantLayout {
@@ -139,10 +141,12 @@ struct CallbackBinding {
 struct CompileOptions {
   static constexpr std::uint32_t supervisor_mode = 0x13;
   enum class InstructionSet : std::uint8_t { arm, thumb };
+  enum class MemoryMode : std::uint8_t { exact, direct };
   InstructionSet instruction_set = InstructionSet::arm;
   bool big_endian = false;
   std::uint32_t processor_mode = supervisor_mode; // One CPSR mode per prepared unit.
   std::vector<CallbackBinding> callbacks;
+  MemoryMode memory_mode = MemoryMode::exact;
 };
 
 struct PreparationReport {
@@ -173,10 +177,27 @@ struct NativeSymbols {
     std::uintptr_t address = 0;
   };
 
+  struct TextRange {
+    std::uintptr_t address = 0;
+    std::uint64_t size = 0;
+  };
+
+  struct Site {
+    std::uintptr_t address = 0;
+    std::uint64_t size = 0, variant = 0;
+    std::uint32_t guest_pc = 0;
+  };
+
+  struct FaultMap {
+    std::span<const TextRange> text_ranges;
+    std::span<const Site> sites;
+  };
+
   std::span<const Symbol> symbols;
   // Keeps consumer-owned code alive for the lifetime of every installed image.
   std::shared_ptr<const void> lifetime;
   PreparationReport report;
+  FaultMap fault_map{};
 };
 
 class NativeImage {
@@ -210,6 +231,12 @@ public:
   Core &operator=(Core &&) = delete;
 
   [[nodiscard]] static std::string_view compiler_identity() noexcept;
+  // Called by the consumer's synchronous signal handler. Returns false outside
+  // eligible native accesses; a claimed fatal fault escapes the active entry.
+  // The interrupted thread's signal mask must be in effect before this call.
+  // After a claimed fault only diagnostics are defined; discard this instance.
+  [[nodiscard]] static bool
+  host_fault(std::uintptr_t address, bool writing, std::uintptr_t native_pc) noexcept;
   [[nodiscard]] static SemanticImage lower(const CodeImage &image,
                                            const CompileOptions &options = {});
   [[nodiscard]] static SemanticImage

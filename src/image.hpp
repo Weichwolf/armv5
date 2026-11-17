@@ -31,7 +31,7 @@ struct Variant {
 struct Unit {
   std::size_t variant;
   std::uint32_t mode;
-  bool thumb;
+  bool thumb, direct = false;
 };
 
 struct Image {

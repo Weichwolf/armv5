@@ -19,8 +19,13 @@ bool contains(const Mmu::Entry &entry, std::uint32_t address) {
   return entry.size != 0 && address - entry.virtual_base < entry.size;
 }
 
-Mmu::Translation failure(std::uint32_t mva, std::uint32_t status) {
-  return {.status = Mmu::Status::fault, .mva = mva, .fault_status = status};
+Mmu::Translation
+failure(std::uint32_t mva, std::uint32_t status, std::uint32_t available = 0, bool tiny = false) {
+  return {.status = Mmu::Status::fault,
+          .mva = mva,
+          .available = available,
+          .fault_status = status,
+          .tiny = tiny};
 }
 
 Mmu::Translation
@@ -55,7 +60,8 @@ Mmu::Entry page(std::uint32_t mva, Descriptor input) {
           .domain = static_cast<std::uint8_t>(domain),
           .permission = static_cast<std::uint8_t>(permission),
           .attributes = static_cast<std::uint8_t>((descriptor >> 2) & 3),
-          .section = false};
+          .section = false,
+          .tiny = kind == 3};
 }
 } // namespace
 
@@ -94,7 +100,9 @@ Mmu::Walk Mmu::walk(const Registers::System &system, std::uint32_t mva, Read rea
     return {.result = read_failure(first, failure(mva, 12), first_address), .entry = {}};
   }
   const auto kind = first.value & 3;
-  if (kind == 0) { return {.result = failure(mva, 5), .entry = {}}; }
+  if (kind == 0) {
+    return {.result = failure(mva, 5, 0x100000 - (mva & ~section_mask)), .entry = {}};
+  }
   const auto domain = (first.value >> 5) & 15;
   if (kind == 2) {
     return {.result = {.mva = mva},
@@ -115,7 +123,10 @@ Mmu::Walk Mmu::walk(const Registers::System &system, std::uint32_t mva, Read rea
             .entry = {}};
   }
   const auto page_kind = second.value & 3;
-  if (page_kind == 0) { return {.result = failure(mva, (domain << 4) | 7), .entry = {}}; }
+  if (page_kind == 0) {
+    const auto size = fine ? 1024U : 4096U;
+    return {.result = failure(mva, (domain << 4) | 7, size - (mva & (size - 1))), .entry = {}};
+  }
   if (!fine && page_kind == 3) {
     return {.result = {.status = Status::unpredictable, .mva = mva}, .entry = {}};
   }
@@ -130,7 +141,10 @@ Mmu::Translation Mmu::permissions(const Registers::System &system,
   const auto domain = (system.mapping.domains >> (entry.domain * 2)) & 3;
   const auto fault_domain = std::uint32_t(entry.domain) << 4;
   if (access.check && (domain == 0 || domain == 2)) {
-    return failure(mva, fault_domain | (entry.section ? 9 : 11));
+    return failure(mva,
+                   fault_domain | (entry.section ? 9 : 11),
+                   entry.size - (mva - entry.virtual_base),
+                   entry.tiny);
   }
   bool allowed = !access.check || domain == 3;
   if (!allowed) {
@@ -147,11 +161,17 @@ Mmu::Translation Mmu::permissions(const Registers::System &system,
       default: break;
     }
   }
-  if (!allowed) { return failure(mva, fault_domain | (entry.section ? 13 : 15)); }
+  if (!allowed) {
+    return failure(mva,
+                   fault_domain | (entry.section ? 13 : 15),
+                   entry.size - (mva - entry.virtual_base),
+                   entry.tiny);
+  }
   return {.mva = mva,
           .physical = entry.physical_base + (mva - entry.virtual_base),
           .available = entry.size - (mva - entry.virtual_base),
-          .attributes = entry.attributes};
+          .attributes = entry.attributes,
+          .tiny = entry.tiny};
 }
 
 Mmu::Translation Mmu::translate(

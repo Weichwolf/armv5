@@ -89,6 +89,7 @@ Bytes input_bytes(const CodeImage &input, const CompileOptions &options) {
   out.number(static_cast<unsigned>(options.instruction_set));
   out.number(static_cast<std::uint64_t>(options.big_endian));
   out.number(options.processor_mode);
+  out.number(static_cast<unsigned>(options.memory_mode));
   out.number(options.callbacks.size());
   for (const auto &callback : options.callbacks) {
     out.number(static_cast<unsigned>(callback.role));
@@ -129,6 +130,7 @@ Bytes input_bytes(const CodeImage &input, const CompileOptions &options) {
       out.number(static_cast<std::uint64_t>(region.readable));
       out.number(static_cast<std::uint64_t>(region.writable));
       out.number(static_cast<std::uint64_t>(region.executable));
+      out.number(static_cast<std::uint64_t>(region.shared_mapping));
     }
   }
   out.number(input.transitions.size());
@@ -289,6 +291,15 @@ void validate_links(const CodeImage &input, const Image &image) {
   }
 }
 
+void append_units(Image &image, const std::set<std::pair<std::uint32_t, bool>> &modes) {
+  for (const auto &[mode, thumb] : modes) {
+    image.units.push_back({image.variants.size(), mode, thumb, false});
+    if (image.options.memory_mode == CompileOptions::MemoryMode::direct) {
+      image.units.push_back({image.variants.size(), mode, thumb, true});
+    }
+  }
+}
+
 } // namespace
 
 [[noreturn]] void
@@ -314,6 +325,10 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
   }
   if (!valid_mode(options.processor_mode)) {
     refuse(input.identity, 0, "invalid prepared processor mode");
+  }
+  if (static_cast<unsigned>(options.memory_mode) >
+      static_cast<unsigned>(CompileOptions::MemoryMode::direct)) {
+    refuse(input.identity, 0, "invalid prepared memory mode");
   }
   validate_callbacks(input.identity, options);
   Image result;
@@ -355,9 +370,7 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
     for (const auto &span : copy.spans) {
       for (const auto mode : span.modes) { modes.emplace(mode, span.thumb); }
     }
-    for (const auto &[mode, thumb] : modes) {
-      result.units.push_back({result.variants.size(), mode, thumb});
-    }
+    append_units(result, modes);
     result.variants.push_back(std::move(copy));
   }
   validate_links(input, result);

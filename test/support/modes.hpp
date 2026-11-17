@@ -26,6 +26,9 @@ void mmu_lifecycle();
 void cache_lifecycle();
 void wait_lifecycle();
 
+void mapped_accesses();
+void mapped_aliases();
+
 namespace fixture {
 inline constexpr std::uint32_t user_mode = 0x10, fiq_mode = 0x11, irq_mode = 0x12,
                                supervisor_mode = 0x13, abort_mode = 0x17, undefined_mode = 0x1b,

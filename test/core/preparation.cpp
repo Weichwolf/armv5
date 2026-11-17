@@ -280,6 +280,9 @@ void aliases_and_transitions() {
 int main() {
   try {
     mapped_memory();
+    direct_memory();
+    mapped_views();
+    native_provider();
     bounds_and_snapshot();
     artifact_cache();
     callbacks_and_faults();

@@ -464,6 +464,8 @@ void preparation_refusals() {
 
 int main() {
   try {
+    mapped_accesses();
+    mapped_aliases();
     arithmetic();
     shifts();
     conditions();

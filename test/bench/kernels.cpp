@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "armv5/core.hpp"
 #include "fft.hpp"
+#include "machine.hpp"
 #include "reference.hpp"
 #include "support/isa.hpp"
 #include "support/modes.hpp"
-#ifdef ARMV5_MAPPED_BENCH
-#include "support/mapped.hpp"
-#endif
 
 #include <algorithm>
 #include <array>
@@ -35,16 +33,7 @@
 #endif
 
 namespace {
-#ifdef ARMV5_MAPPED_BENCH
-using BenchmarkMachine = fixture::MappedMachine;
-using BenchmarkModes = fixture::MappedMachine;
-#else
-using BenchmarkMachine = fixture::Machine;
-using BenchmarkModes = fixture::Modes;
-#endif
-template <class Machine> void verify_storage(const Machine &machine) {
-  if constexpr (requires { machine.verify_storage(); }) { machine.verify_storage(); }
-}
+using BenchmarkMachine = benchmark::Machine;
 
 struct Measurement {
   double seconds = 0, instructions = 0, cycles = 0;
@@ -146,13 +135,23 @@ struct Workload {
   std::uint64_t cycles, samples;
 };
 
+std::string_view mapping_name() {
+  switch (benchmark::configuration.mapping) {
+    case benchmark::Mapping::off: return "off";
+    case benchmark::Mapping::identity: return "identity";
+    case benchmark::Mapping::remapped: return "remapped";
+  }
+  throw std::logic_error("invalid benchmark mapping");
+}
+
 void report(std::string_view kernel,
             std::uint64_t guests,
             std::size_t words,
-            const armv5::PreparationReport &prepared,
+            const BenchmarkMachine &machine,
             std::vector<Measurement> native,
             std::vector<Measurement> reference,
             Workload workload) {
+  const auto &prepared = machine.prepared().report();
   std::ranges::sort(native, {}, &Measurement::seconds);
   std::ranges::sort(reference, {}, &Measurement::seconds);
   const auto &value = native[native.size() / 2];
@@ -164,7 +163,11 @@ void report(std::string_view kernel,
             << prepared.native_bytes << ',' << double(prepared.native_bytes) / double(words) << ','
             << double(guests) / double(workload.samples) << ','
             << double(workload.cycles) / double(workload.samples) << ','
-            << nanoseconds * value.seconds / double(guests) << ',' << 1.0 << '\n';
+            << nanoseconds * value.seconds / double(guests) << ',' << 1.0 << ','
+            << (benchmark::configuration.memory == armv5::CompileOptions::MemoryMode::direct
+                    ? "direct"
+                    : "exact")
+            << ',' << mapping_name() << ',' << machine.installation_seconds << '\n';
 }
 
 fixture::Program copy_program() {
@@ -215,7 +218,7 @@ void copy_kernel(Counters &counters) {
     registers.r[10] = words;
     machine.registers(registers);
   };
-  armv5::Registers expected_registers;
+  auto expected_registers = machine.expected_registers();
   constexpr std::uint32_t completed_status = 0x600000d3;
   expected_registers.cpsr = completed_status;
   expected_registers.r[0] = 0x8000;
@@ -227,7 +230,7 @@ void copy_kernel(Counters &counters) {
   expected_registers.r[10] = words;
   expected_registers.r[15] = program.pc() - 4;
   auto check = [&] {
-    verify_storage(machine);
+    machine.verify_storage();
     fixture::require(machine.ram == expected && machine.core->registers() == expected_registers,
                      "K5 complete registers and RAM output");
     fixture::require(machine.core->state().execution == armv5::ExecutionState::ready,
@@ -262,7 +265,7 @@ void copy_kernel(Counters &counters) {
   report("K5",
          guests,
          program.bytes().size() / 4,
-         machine.prepared().report(),
+         machine,
          native,
          reference,
          {.cycles = cycles, .samples = std::uint64_t(words) * repetitions});
@@ -325,7 +328,7 @@ void control_kernel(Counters &counters) {
     registers.r[13] = stack;
     machine.registers(registers);
   };
-  armv5::Registers expected_registers;
+  auto expected_registers = machine.expected_registers();
   constexpr std::uint32_t completed_status = 0x600000d3;
   expected_registers.cpsr = completed_status;
   expected_registers.r[0] = answer.state;
@@ -336,7 +339,7 @@ void control_kernel(Counters &counters) {
   expected_registers.r[14] = expected_registers.r[4] + (5 * 4);
   expected_registers.r[15] = program.address() + (5 * 4);
   auto check = [&] {
-    verify_storage(machine);
+    machine.verify_storage();
     fixture::require(machine.core->registers() == expected_registers && machine.ram == expected,
                      "K4 complete registers/table/stack output");
     fixture::require(machine.core->state().execution == armv5::ExecutionState::ready,
@@ -368,7 +371,7 @@ void control_kernel(Counters &counters) {
   report("K4",
          guests,
          program.bytes().size() / 4,
-         machine.prepared().report(),
+         machine,
          native,
          reference,
          {.cycles = cycles, .samples = iterations});
@@ -497,7 +500,7 @@ void fir_kernel(Counters &counters, bool event_load) {
     code.push_back({.program = handler, .modes = {irq_processor_mode}});
     vectors.push_back(irq_vector);
   }
-  BenchmarkModes machine(std::move(code), vectors, true, numeric_ram_size);
+  BenchmarkMachine machine(std::move(code), vectors, true, numeric_ram_size);
   const auto signal = numeric_input();
   std::vector<std::int32_t> input(taps - 1, 0);
   input.insert(input.end(), signal.begin(), signal.end());
@@ -536,7 +539,7 @@ void fir_kernel(Counters &counters, bool event_load) {
     registers.r[9] = coefficient_address;
     registers.r[10] = output_address;
     registers.r[14] = rounding_bias;
-    machine.core->set_registers(registers);
+    machine.registers(registers);
   };
   auto work = [&] {
     if (event_load) {
@@ -545,7 +548,7 @@ void fir_kernel(Counters &counters, bool event_load) {
       (void)machine.core->run(guests);
     }
   };
-  armv5::Registers expected_registers;
+  auto expected_registers = machine.expected_registers();
   expected_registers.cpsr = fir_completed_status;
   expected_registers.r[0] = input_address + (outputs - 2) * 4;
   expected_registers.r[1] = coefficient_address + taps * 4;
@@ -566,7 +569,7 @@ void fir_kernel(Counters &counters, bool event_load) {
   expected_registers.r[14] = rounding_bias;
   expected_registers.r[15] = program.pc() - 4;
   auto check = [&] {
-    verify_storage(machine);
+    machine.verify_storage();
     const auto state = machine.core->state();
     fixture::require(machine.ram == expected && state.registers == expected_registers &&
                          state.banks.irq[0] == events &&
@@ -591,7 +594,7 @@ void fir_kernel(Counters &counters, bool event_load) {
   report(event_load ? "K6" : "K1",
          guests,
          (program.bytes().size() + (event_load ? handler.bytes().size() : 0)) / 4,
-         machine.prepared().report(),
+         machine,
          native,
          reference,
          {.cycles = cycles, .samples = outputs});
@@ -681,7 +684,7 @@ void biquad_kernel(Counters &counters) {
   machine.prepare();
   constexpr std::uint64_t guests = std::uint64_t(blocks) * (frames * 233 + 3);
   constexpr std::uint64_t cycles = (std::uint64_t(blocks) * (frames * 261 + 3)) - 2;
-  armv5::Registers expected;
+  auto expected = machine.expected_registers();
   constexpr std::uint32_t final_status = 0x600000d3;
   expected.cpsr = final_status;
   expected.r[0] = input_address + outputs * 4;
@@ -707,11 +710,11 @@ void biquad_kernel(Counters &counters) {
     registers.r[9] = state_address;
     registers.r[12] = rounding_bias;
     registers.r[13] = blocks;
-    machine.core->set_registers(registers);
+    machine.registers(registers);
   };
   auto work = [&] { (void)machine.core->run(guests); };
   auto check = [&] {
-    verify_storage(machine);
+    machine.verify_storage();
     fixture::require(machine.core->registers() == expected && machine.ram == expected_ram &&
                          machine.core->state().progress ==
                              armv5::Progress{.instructions = guests, .base_cycles = cycles},
@@ -736,7 +739,7 @@ void biquad_kernel(Counters &counters) {
   report("K2",
          guests,
          program.bytes().size() / 4,
-         machine.prepared().report(),
+         machine,
          native,
          reference,
          {.cycles = cycles, .samples = outputs});
@@ -882,7 +885,7 @@ void fft_kernel(Counters &counters) {
   machine.prepare();
   constexpr std::uint64_t guests = std::uint64_t(fft_repetitions) * 38715;
   constexpr std::uint64_t cycles = (std::uint64_t(fft_repetitions) * 41273) - 2;
-  armv5::Registers expected;
+  auto expected = machine.expected_registers();
   constexpr std::uint32_t final_status = 0x600000d3;
   expected.cpsr = final_status;
   expected.r[0] = fft_output + fft_points * 4;
@@ -903,11 +906,11 @@ void fft_kernel(Counters &counters) {
     machine.core->reset(program.address());
     auto registers = machine.core->registers();
     registers.r[14] = fft_repetitions;
-    machine.core->set_registers(registers);
+    machine.registers(registers);
   };
   auto work = [&] { (void)machine.core->run(guests); };
   auto check = [&] {
-    verify_storage(machine);
+    machine.verify_storage();
     fixture::require(machine.core->registers() == expected && machine.ram == expected_ram &&
                          machine.core->state().progress ==
                              armv5::Progress{.instructions = guests, .base_cycles = cycles},
@@ -934,7 +937,7 @@ void fft_kernel(Counters &counters) {
   report("K3",
          guests,
          program.bytes().size() / 4,
-         machine.prepared().report(),
+         machine,
          native,
          reference,
          {.cycles = cycles, .samples = std::uint64_t(fft_points) * fft_repetitions});
@@ -944,12 +947,24 @@ void fft_kernel(Counters &counters) {
 
 int main(int argc, char **argv) {
   try {
+    const std::string_view mapping = argc > 2 ? argv[2] : "off";
+    const std::string_view memory = argc > 3 ? argv[3] : "direct";
+    fixture::require(argc <= 4 &&
+                         (mapping == "off" || mapping == "identity" || mapping == "remapped") &&
+                         (memory == "direct" || memory == "exact"),
+                     "unknown benchmark memory declaration");
+    if (mapping == "identity") { benchmark::configuration.mapping = benchmark::Mapping::identity; }
+    if (mapping == "remapped") { benchmark::configuration.mapping = benchmark::Mapping::remapped; }
+    if (memory == "exact") {
+      benchmark::configuration.memory = armv5::CompileOptions::MemoryMode::exact;
+    }
     Counters counters;
     std::cout << std::setprecision(9)
               << "kernel,guest_instructions,host_instructions_per_guest,host_cycles_per_guest,"
                  "guest_per_second,native_over_clang_O3_seconds,preparation_seconds,native_text_"
                  "bytes,text_bytes_per_prepared_instruction,guest_instructions_per_sample,"
-                 "guest_cycles_per_sample,ns_per_guest,native_guest_share\n";
+                 "guest_cycles_per_sample,ns_per_guest,native_guest_share,memory_mode,mapping,"
+                 "installation_seconds\n";
     const std::string_view selected = argc > 1 ? argv[1] : "all";
     fixture::require(selected == "all" || selected == "K1" || selected == "K2" ||
                          selected == "K3" || selected == "K4" || selected == "K5" ||

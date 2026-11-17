@@ -47,6 +47,57 @@ revokes any old binding. Installed images are immutable and can be shared betwee
 independent owners. `set_memory` copies new storage descriptors while stopped
 and revokes the binding; a new matching install is required.
 
+## Direct memory mode
+
+`CompileOptions::memory_mode` defaults to `exact`. A `direct` preparation
+contains separate Exact and Direct units; installation selects the eligible
+units outside execution. Direct guest loads and stores are typed volatile LLVM
+accesses through a reserved 4 GiB view. Guest address arithmetic retains its
+32-bit wrap, endian conversion and ARMv5 alignment/rotation semantics.
+Registers and flags remain ordinary SSA values. There is no per-access mode
+switch or address admission in these units.
+
+A region can declare `mapping_fd` and `mapping_offset`, identifying the shared
+file storage that its `bytes` already expose. The consumer guarantees that
+identity and keeps a compatible descriptor open until rebinding. Descriptor
+numbers are not part of artifact identity. `RegionLayout::shared_mapping` is the
+corresponding preparation assumption. The core checks file bounds, offset
+alignment and layout compatibility and derives mappings from actual CP15,
+FCSE, domain, permission, TCM and retained TLB state. File identity and offsets
+also identify executable aliases through separate host mappings or duplicated
+descriptors. Every such code page is protected in the Direct view.
+
+Direct currently selects one privilege-class view; another privilege class
+executes Exact. Tiny pages, host-subpage permissions, incompatible retained TLB
+translations, unexpressible storage geometry and active TLB-lockdown filling
+select Exact. Forced-user accesses retain their Exact helper. Registered Io
+callbacks or linked callback roles conservatively select Exact for the image,
+so legitimate I/O remains callback execution. Unreadable prepared code also
+selects Exact. These are eligibility limits of this implementation. Exact
+retains precise guest aborts, including partial multiple-transfer effects.
+
+The consumer owns the process signal handler. It passes the fault address,
+write indication and interrupted native PC to `Core::host_fault`. Before the
+call it restores the interrupted thread's signal mask from the signal context;
+if the call returns false it restores the handler mask before chaining. The
+core installs no handler and changes no signal mask on successful entry.
+Unrelated faults, faults outside active native execution and faults in C++
+helpers are declined. A claimed fault escapes to the owner, reports a fatal
+memory fault and permanently disables the instance. Only its returned fault
+diagnostics are defined: address, operation, image identity, variant and guest
+PC where the copied line table provides one. State and progress at the faulting
+instruction are unavailable. Discard the Core; use Exact when precise abort
+state or resumption is required.
+
+A consumer native provider supplies `NativeSymbols::fault_map`: actual loaded
+executable `TextRange`s and native `Site` intervals from debug line tables. The
+lowered bitcode uses `line = guest_pc + 1`, with variant in the file name
+`armv5-v<ID>`; line zero is unknown. `bind` validates and copies the intervals,
+rejects unknown variants and retains the supplied code lifetime. Missing source
+coverage is diagnosed with the native PC rather than a fabricated guest PC.
+The standalone compiler collects the same metadata through LLVM. The independent
+provider in `test/core/provider.cpp` demonstrates consumer linking and binding.
+
 ## CP15 state and storage spaces
 
 `Registers::system` exposes the implemented CP15 register state. Its `mapping`
@@ -297,7 +348,7 @@ native binding without any private core headers.
 Preparation/install failures throw `std::runtime_error` with guest context.
 Invalid owner initialization throws `std::invalid_argument`; reentry throws
 `std::logic_error`. Execution failures return `Fault` and latch until reset or
-restore. Missing physical storage and denied region permissions cause a Data
+restore, except terminal Direct host faults as described above. Missing physical storage and denied region permissions cause a Data
 Abort; a present Io callback returning false remains an explicit host memory
 fault. A Data Abort preserves the original instruction base register (the ARM9E
 base-restored model), leaves the failing instruction unretired and enters Abort

@@ -49,6 +49,16 @@ revokes the binding; execution continues only after a declared variant is
 installed. Record code identities and dependencies by explicit generation, never
 by hashing guest memory at run time.
 
+Direct preparation emits separate Exact and Direct units with the same operation
+lowering. Cold installation derives a protected host view from shared physical
+storage and actual guest translation state, then selects eligible entries.
+Direct guest accesses use typed volatile loads/stores through one hoisted view
+base; this preserves aliases that LLVM cannot infer from virtual addresses.
+Registers and flags remain SSA. Unexpressible mappings and callback roles retain
+Exact execution. Consumer-owned executable ranges and line tables identify a
+terminal host fault without adding access-path metadata instructions. Eligibility,
+fault-handler ownership and snapshot requalification are described in `api.md`.
+
 ### Lowering rules, measured on cpu12 and dsp56300
 
 These rules come from whole-instrument measurements of the Blofeld emulator
