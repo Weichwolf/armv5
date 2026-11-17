@@ -163,8 +163,12 @@ public:
   }
 };
 
-void check(
-    Machine &machine, Instruction instruction, FaultCase fault, std::uint32_t mode, bool callback) {
+void check(Machine &machine,
+           Instruction instruction,
+           FaultCase fault,
+           std::uint32_t mode,
+           Failure failure) {
+  const bool callback = failure == Failure::callback;
   auto registers = machine.core->registers();
   registers.cpsr = initial_flags | mode | (instruction.thumb ? 0x20 : 0);
   registers.r[0] = fault.address;
@@ -181,6 +185,14 @@ void check(
   expected.registers.r[15] = entry + size;
   expected.progress = {.instructions = 1, .base_cycles = 1}; // The prefix NOP completed.
   auto ram = machine.original;
+  // ARM926 DDI 0198E section 3.6: a noncached SWP attempts its write after a read abort.
+  if (instruction.operation == Operation::swap && failure == Failure::read_denied) {
+    if (instruction.width == 1) {
+      ram[fault.address & 3] = std::byte(store_words[0] & fixture::byte_mask);
+    } else {
+      fixture::put(ram, store_words[0], machine.big);
+    }
+  }
   for (unsigned index = 0; index < fault.beat; ++index) {
     if (instruction.operation == Operation::load) {
       expected.registers.r[index + 2] = data_words[index];
@@ -242,7 +254,7 @@ void verify(Machine &machine, Instruction instruction, FaultCase fault, Failure 
     machine.core->restore(clean);
     std::ranges::copy(machine.original, machine.data.begin());
     machine.refusal.calls = 0;
-    check(machine, instruction, fault, mode, failure == Failure::callback);
+    check(machine, instruction, fault, mode, failure);
   }
   machine.core->restore(clean);
 }

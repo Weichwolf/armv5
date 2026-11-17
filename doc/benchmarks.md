@@ -748,3 +748,53 @@ ICache execution/maintenance, WFI, remaining debug/CP14/Jazelle behavior and the
 exhaustive profile audit remain open. Exact declared mapping contexts remain
 required; general M=1 performance is unqualified. CoreMark and final own/generated-
 code sanitizers follow; macOS ARM64 remains untested. This is not A5 completion.
+
+## Uncached SWP external-abort ordering
+
+ARM926 DDI 0198E section 3.6 requires the write part of an uncached SWP even
+when its read externally aborts. Writable RAM now receives that write before
+Data Abort entry; the destination and instruction retirement stay unchanged.
+NCNB and NCB use the same behavior. Code-alias writes retain their invalidation,
+then enter Abort before a declared transition or a changed-code fault. Atomic
+I/O remains one swap callback, and callback refusal remains a host memory fault.
+
+The old read-denied SWP/SWPB RAM expectation incorrectly assumed no write. That
+expectation and the implementation are corrected together against the primary
+reference. Other abort expectations are retained. Independent fixtures cover
+all seven modes, both byte orders, four byte offsets, word/byte transfers,
+fixed/dynamic layouts, MMU-disabled and NCNB/NCB pages, every physical read/write
+permission combination, exact DFSR/FAR/IFSR and progress, code-alias transitions
+and snapshot replay. Translation/permission/alignment aborts still precede the
+physical access.
+
+K1–K6 complete outputs/hashes, 34,042 K6 IRQs and 256-cycle bounds pass. All
+rounded host-instruction counts and native text sizes are unchanged from the
+DCache increment. Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release and warm median
+of three user hardware-counter measurements (`perf_event_paranoid=2`); these
+common M=0 kernels do not measure the newly corrected abort path.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 8.289 | 2.248 | 0.565631 | 1767.938 | 6.805x | 0.128956 | 8,144 | 290.857 |
+| K2 | 6.172 | 1.694 | 0.450718 | 2218.680 | 3.215x | 0.309415 | 17,876 | 259.072 |
+| K3 | 5.646 | 1.497 | 0.376872 | 2653.421 | 0.976x | 0.298155 | 17,081 | 271.127 |
+| K4 | 12.205 | 2.994 | 0.751930 | 1329.912 | 11.987x | 0.975845 | 24,758 | 434.351 |
+| K5 | 8.007 | 2.231 | 0.559324 | 1787.873 | 42.203x | 0.077200 | 5,526 | 502.364 |
+| K6 | 12.742 | 3.975 | 1.040800 | 960.800 | 12.889x | 0.140750 | 9,030 | 301.000 |
+
+Guest instruction/base-cycle totals and 100% native guest share are unchanged.
+Compiler identity:
+
+```text
+armv5-c1c432306f575ca387df41b1a4db071fa3c2a71bedc1c10d3df989c21c02ab2c-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites in the working tree and matching
+source-only export, configured tidy/format and eight installed SDK consumers.
+The added two-header consumer checks a read-aborted SWP's RAM write, unchanged
+destination, original FAR, guest MRC readback and snapshot replay. Published
+`src/` 5,535 (+6), `test/` 9,733 (+129) against the DCache increment.
+
+A5 remains open for ICache execution/maintenance, WFI, remaining debug/CP14/
+Jazelle behavior and exhaustive profile qualification. CoreMark and final
+own/generated-code sanitizers follow; macOS ARM64 remains untested.

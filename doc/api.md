@@ -124,6 +124,14 @@ host memory fault and leaves DFSR/FAR/IFSR unchanged, including after a partial
 multiple transfer. Missing vector declarations still report the actual vector;
 fault registers already reflect the architectural data abort.
 
+An uncached SWP/SWPB attempts its write even when its physical read externally
+aborts (ARM926 DDI 0198E section 3.6). Writable lent storage therefore changes,
+while the destination register and instruction retirement remain unchanged and
+Data Abort records the original MVA. This applies to NCNB and NCB pages alike;
+the write part of an NCB swap can also abort. MMU permission/alignment failures
+precede the bus transaction. Callback swaps remain one atomic callback: false
+is a host fault, with no invented second callback or architectural abort.
+
 With M set, declared instruction addresses and data addresses are virtual. The
 FCSE PID modifies addresses below 32MB; higher addresses remain unchanged.
 Translation supports 1MB sections, coarse/fine tables, 64KB/4KB pages with their

@@ -448,6 +448,12 @@ struct Core::Impl {
                        .replacement = replacement});
     }
     if ((operation != 1 && !region->readable) || (operation != 0 && !region->writable)) {
+      // ARM926 DDI 0198E section 3.6: an externally aborted SWP read still
+      // attempts the write. Keep its code-alias effects before latching Abort.
+      if (operation == 2 && region->writable) {
+        request.operation = 1;
+        (void)transaction(request, bus);
+      }
       runtime.signal = static_cast<std::uint32_t>(detail::Signal::external_abort);
       runtime.address = address;
       return access_failure;

@@ -440,7 +440,7 @@ void subpages(bool large, bool fine, bool big) {
       "only the invalidated subpage refills, while other preserved subpages remain cached");
 }
 
-void code_alias(bool partial, bool declared) {
+void code_alias(bool partial, bool declared, bool swap = false) {
   fixture::Program original;
   fixture::Program handler(0x10);
   constexpr std::uint32_t store_pair = 0xe8a00006;
@@ -448,7 +448,10 @@ void code_alias(bool partial, bool declared) {
   constexpr std::uint32_t alias_section = 0x00100c12;
   constexpr std::uint32_t replacement = 0xe3a02009;
   constexpr std::uint32_t alias_start = 0x01001000;
-  if (partial) {
+  constexpr std::uint32_t swap_word = 0xe1002091;
+  if (swap) {
+    original.word(swap_word); // SWP R2,R1,[R0].
+  } else if (partial) {
     original.word(store_pair);
   } else {
     original.word(fixture::transfer(false, false, 1, 0, 0));
@@ -460,6 +463,15 @@ void code_alias(bool partial, bool declared) {
                               {0x10});
   machine.first(16, alias_section);
   machine.regions[0].writable = true;
+  if (swap) {
+    constexpr std::uint32_t write_alias_section = 0x00300c12;
+    machine.first(16, write_alias_section);
+    machine.regions.back() = {.address =
+                                  fixture::MmuMachine::alternate_physical + original.address(),
+                              .bytes = machine.code[0],
+                              .readable = false,
+                              .writable = true};
+  }
   machine.core->set_memory({.regions = machine.regions, .generation = 1});
   auto bytes = original.bytes();
   fixture::put(std::span(bytes).subspan(partial ? 0 : 4, 4), replacement);
@@ -498,8 +510,10 @@ void code_alias(bool partial, bool declared) {
                    "translated code alias retains exact store/abort prefix and consumer bytes");
   if (partial) {
     fixture::require(machine.core->registers().system.data_fault_status == 8 &&
-                         machine.core->registers().system.fault_address == alias_start + 4 &&
-                         machine.core->registers().r[14] == original.address() + 8,
+                         machine.core->registers().system.fault_address ==
+                             alias_start + (swap ? 0 : 4) &&
+                         machine.core->registers().r[14] == original.address() + 8 &&
+                         (!swap || machine.core->registers().r[2] == registers.r[2]),
                      "partial translated code write enters Data Abort before binding revocation");
   }
   if (declared) {
@@ -581,6 +595,7 @@ void mmu_lifecycle() {
   for (const bool partial : {false, true}) {
     for (const bool declared : {false, true}) { code_alias(partial, declared); }
   }
+  for (const bool declared : {false, true}) { code_alias(true, declared, true); }
   code_remap(false);
   code_remap(true);
   for (const bool large : {false, true}) {

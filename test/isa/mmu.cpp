@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -344,6 +345,106 @@ void fault_classes(bool big) {
   }
 }
 
+struct SwapAccess {
+  bool byte, readable, writable;
+  std::uint32_t mode;
+  unsigned offset;
+};
+
+void uncached_swap_case(fixture::MmuMachine &machine, SwapAccess access) {
+  const auto [byte, readable, writable, mode, offset] = access;
+  fixture::put(std::span(machine.data).subspan(0x4000, 4), value, machine.big);
+  machine.core->reset(0x1000);
+  auto registers = machine.core->registers();
+  registers.cpsr = flags | mode;
+  registers.r[0] = fixture::MmuMachine::data_virtual + offset;
+  registers.r[1] = initial_far;
+  registers.r[2] = old_value;
+  registers.system.mapping = machine.mapping();
+  registers.system.instruction_fault_status = initial_instruction_status;
+  machine.core->set_registers(registers);
+  (void)machine.core->install(machine.prepared(), 0);
+  auto expected = machine.core->state();
+  auto ram = machine.data;
+  if (writable) {
+    if (byte) {
+      ram[0x4000 + offset] = std::byte(initial_far & fixture::byte_mask);
+    } else {
+      fixture::put(std::span(ram).subspan(0x4000, 4), initial_far, machine.big);
+    }
+  }
+  if (readable && writable) {
+    const auto shift = (machine.big ? 3 - offset : offset) * 8;
+    expected.registers.r[2] = byte ? (value >> shift) & fixture::byte_mask
+                                   : std::rotr(value, static_cast<int>(offset * 8));
+    expected.registers.r[15] = next_pc;
+    expected.progress = {.instructions = 1, .base_cycles = 2};
+  } else {
+    constexpr std::uint32_t abort_status = 0x98000097;
+    expected.registers.cpsr = abort_status;
+    expected.registers.spsr = registers.cpsr;
+    expected.registers.r[14] = abort_link;
+    expected.registers.r[15] = 0x10;
+    expected.banks.abort[1] = abort_link;
+    expected.banks.spsr[3] = registers.cpsr;
+    expected.registers.system.data_fault_status = 8;
+    expected.registers.system.fault_address = registers.r[0];
+    expected.progress = {.instructions = 0, .base_cycles = 3};
+  }
+  const auto result = machine.core->run_until(1);
+  fixture::require(machine.core->state() == expected && machine.data == ram &&
+                       result.progress == expected.progress,
+                   "NCNB/NCB SWP attempts the write after a physical read abort, preserving "
+                   "destination, MVA fault status and exact retirement");
+}
+
+void uncached_swap_permissions(fixture::MmuMachine &machine, bool byte, bool fixed) {
+  for (const bool readable : {false, true}) {
+    for (const bool writable : {false, true}) {
+      auto &region = *std::ranges::find(
+          machine.regions, fixture::MmuMachine::data_physical, &armv5::Memory::Region::address);
+      region.readable = readable;
+      region.writable = writable;
+      auto &layout = *std::ranges::find(
+          machine.layout, fixture::MmuMachine::data_physical, &armv5::RegionLayout::address);
+      layout.readable = readable;
+      layout.writable = writable;
+      machine.core->set_memory({.regions = machine.regions, .generation = 1});
+      machine.prepare(fixed);
+      for (const auto mode : modes) {
+        for (unsigned offset = 0; offset < 4; ++offset) {
+          uncached_swap_case(machine,
+                             {.byte = byte,
+                              .readable = readable,
+                              .writable = writable,
+                              .mode = mode,
+                              .offset = offset});
+        }
+      }
+    }
+  }
+}
+
+void uncached_swaps(bool big, bool fixed) {
+  constexpr std::uint32_t swap_word = 0xe1002091;
+  constexpr std::uint32_t swap_byte = 0xe1402091;
+  for (const bool byte : {false, true}) {
+    for (const bool buffered : {false, true}) {
+      fixture::Program code(0x1000, big);
+      fixture::Program handler(0x10, big);
+      code.word(byte ? swap_byte : swap_word); // SWP{B} R2,R1,[R0].
+      handler.word(return_abort_word);
+      fixture::MmuMachine machine({{.program = code, .modes = {modes.begin(), modes.end()}},
+                                   {.program = handler, .modes = {fixture::abort_mode}}},
+                                  {0x10},
+                                  big);
+      machine.context.control |= 4; // Global C cannot cache an NCNB/NCB descriptor.
+      machine.first(32, data_section_descriptor | (buffered ? 4U : 0U));
+      uncached_swap_permissions(machine, byte, fixed);
+    }
+  }
+}
+
 void multiple_fault(bool page_fault) {
   fixture::Program code;
   fixture::Program handler(0x10);
@@ -578,6 +679,7 @@ void mmu_instructions() {
       sections(big, fixed);
       pages(big, fixed);
       permissions(big, fixed);
+      uncached_swaps(big, fixed);
     }
     fcse(big);
     fault_classes(big);
