@@ -33,9 +33,10 @@ cmake --install build --prefix /your/prefix
 
 Consumers use `find_package(armv5 CONFIG REQUIRED)` and link `armv5::core`.
 Linux x86-64 execution of the declared functional profile is validated; macOS
-ARM64 remains untested. Milestones A1–A5 are implemented. Register retention
-across units, full address-space backing/MMU views and cross-unit flag liveness
-follow before CoreMark; own/generated-code sanitizer qualification is pending.
+ARM64 remains untested. Milestones A1–A5 are implemented; register retention is
+qualified in the existing SSA control flow. Full address-space backing/MMU views
+and cross-unit flag liveness follow before CoreMark; own/generated-code sanitizer
+qualification is pending.
 Hardware user counters are accessible on Linux; see [benchmark definitions](test/bench/README.md)
 and the [measured baseline](doc/benchmarks.md) for checked, reproducible reports.
 

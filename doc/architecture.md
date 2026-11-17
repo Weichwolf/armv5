@@ -79,6 +79,15 @@ These rules come from whole-instrument measurements of the Blofeld emulator
 7. **State lives in registers, not in core memory.** Guest RAM is consumer
    storage reached through declared layouts; the processor state is not written
    back between instructions.
+
+   Guest registers remain SSA values through the entire mode/state CFG, including
+   dynamic dispatch, so armv5 already satisfies R1 without splitting units or
+   adding a pinned-argument ABI. Native stepping finds no Runtime register-field
+   access in K4's 112-instruction steady cycle (0.0268 host instructions/GI over a
+   complete 128-transition run) and 0.397 in a K6 event window including owner
+   inspection, bounds and IRQ entry/return; materialization stays at observable
+   owner, callback and mode boundaries (see `benchmarks.md`).
+
 8. **Cacheable preparation and complete save and restore from the first usable
    Core.** Both are contract requirements and both were expensive to retrofit.
 9. **Idle loops are data.** A firmware loop pass that changes nothing can be

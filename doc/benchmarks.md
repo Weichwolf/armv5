@@ -1000,3 +1000,75 @@ including MMU views, then cross-unit flag liveness. Each optimization requires
 all six checked outputs and a separate measured comparison. Own/generated-code
 ASan/UBSan and separate TSan qualification remain pending. macOS ARM64 is untested;
 no developer host was available. The overall work remains open for those steps.
+
+## R1 register-retention qualification
+
+The existing A5 mode/state functions already retain guest registers in SSA through
+static edges and dynamic dispatch. Native stepping qualifies R1 with no production
+change: register-field traffic is below one host instruction per guest instruction
+in both K4 and K6. The next implementation step is full address-space backing/MMU
+views, followed by cross-unit flag liveness.
+
+Measured on the same Linux x86-64 i5-10400 and LLVM 19.1.7 Release as A5, using
+`31c52bc`. The installed SDK archive and restored build archive are byte-identical
+(SHA-256 `a5a5148b6bc818a73edf332bbff33af576af3a12c4698192280ced64e5d9a1ae`);
+the benchmark executable is also byte-identical to the saved A5 executable.
+The profiler uses public lower/bind/install/run APIs, the same LLVM O3/native
+pipeline and the authored benchmark programs. GDB stepping observes the generated
+code and owner calls without modifying the core or adding runtime instrumentation.
+Raw disassembly, traces and profiling tools remain ignored local analysis.
+
+A register-field instruction means an executed native instruction whose memory
+operand touches this owner's Runtime R0–R15, CPSR/SPSR or banked registers.
+Vector accesses count once per host instruction; progress, bounds, signals,
+descriptors, consumer RAM and host stack spills are excluded. Effective addresses
+were checked against the actual owner pointer and the field offsets of this build.
+K4's cycle is a repeated 112-guest-instruction path through all eight handlers;
+its 1,438 host instructions agree with the hardware-counter rate of 12.839 I/GI.
+A complete 128-transition K4 run additionally includes owner entry/exit.
+K6 covers 32 deadline grants at 256-cycle intervals, one IRQ and its return:
+5,227 completed guest instructions and 8,193 base cycles (the final deadline
+overshoots at a complete instruction). The K4 reference output and K6 complete RAM
+prefix/IRQ count are checked independently after the traced window.
+
+| Quantity | K4 steady cycle | K4 complete short run | K6 event window |
+|---|---:|---:|---:|
+| Completed guest instructions | 112 | 1,792 | 5,227 |
+| Stepped host instructions | 1,438 | 23,378 | 66,045 |
+| Native register-field instructions at ordinary owner entry/exit | 0 | 45 | 1,440 |
+| Owner bookkeeping and explicit state inspection | 0 | 3 | 577 |
+| IRQ eligibility, entry, return and bank/mode changes (including IRQ native entry/exit) | 0 | 0 | 58 |
+| Register-field instructions at ordinary dynamic transfers | 0 | 0 | 0 |
+| Register-field instructions inside straight translated flow | 0 | 0 | 0 |
+| Register-field instructions at memory-helper/Io calls | 0 | 0 | 0 |
+| Total register-field instructions | 0 | 48 | 2,075 |
+| Register-field host instructions/GI | 0 | 0.026786 | 0.396977 |
+| Generic dispatches from guest control | 16 | 256 | 0 |
+| Routing instructions for those dispatches | 136 | 2,176 | 0 |
+| Routing instructions/dynamic dispatch | 8.5 | 8.5 | — |
+| Dynamic dispatches/GI | 0.142857 | 0.142857 | 0 |
+| Owner/mode-entry PC dispatches | 0 | 1 | 33 |
+| Routing instructions for owner/mode-entry dispatch | 0 | 9 | 258 |
+
+Dispatch routing counts target-index formation, range checks, jump-table lookup
+and the indirect jump. It excludes guest branch/interworking effects, link values,
+accounting and PHI register moves. K4 uses eight 8-instruction BLX dispatches and
+eight 9-instruction loaded-PC return dispatches per cycle. Eight additional guest
+BX LR leaf returns use guarded static SSA continuations. K6 has no ordinary guest
+indirect dispatch; its one exception return changes mode through the owner, while
+entry/resume routing costs 8 instructions per Supervisor entry and 2 at the IRQ
+entry (32 × 8 + 2 = 258). No memory-helper or Io call occurs in these fixed-RAM
+windows. All native K6 register-field accesses occur in the entry-load and common
+exit-store ranges, with none in the intervening guest flow.
+
+After profiling, the unchanged full K1–K6 benchmark passes complete outputs/hashes,
+34,042 K6 IRQs and 256-cycle bounds. Rounded host I/GI and native text sizes remain
+identical to the A5 report; fresh user-counter cycles/GI are K1 2.147, K2 1.659,
+K3 1.429, K4 3.220, K5 2.127 and K6 3.956. This is an attribution result, not a
+speedup claim. No new ISA behavior or supported-host claim is introduced; macOS
+ARM64 remains untested.
+
+Published `src/` 5,281 (+0), `test/` 9,183 (+0). The existing Release/ISA/core/bench
+qualification remains applicable to the identical source and binaries; no tests
+were changed. R1 is satisfied by the current SSA control flow; memory mapping,
+flag liveness, CoreMark and final sanitizer qualification remain open.
