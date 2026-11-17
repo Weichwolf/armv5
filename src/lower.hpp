@@ -151,6 +151,12 @@ private:
   void exit(const Values &values, Signal signal, llvm::Value *address);
   void finish_exit(const Values &values, llvm::Value *signal, llvm::Value *address);
   void guard(llvm::Value *valid, const Values &values, Signal signal, llvm::Value *address);
+  [[nodiscard]] bool exchanges(const Instruction &instruction) const;
+  void fetch_instruction(Values &values, llvm::Value *address, unsigned width);
+  void branch_yield(Values values, llvm::Value *target, bool exchange);
+  llvm::Value *callback_address(CallbackBinding::Role role);
+  llvm::Value *virtual_access(
+      Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value);
   void signal_guard(const Instruction &instruction, Values values, llvm::Value *old_status);
   void transfer(Values values,
                 llvm::Value *target,
@@ -167,6 +173,7 @@ private:
   void admission_paths();
   void emit_block(Block &body);
   void emit_tail(std::size_t index);
+  [[nodiscard]] static Signal system_signal(const Instruction &instruction);
   bool emit_event(const Instruction &instruction,
                   Values &values,
                   llvm::Value *old_status,

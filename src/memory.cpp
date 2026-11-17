@@ -11,6 +11,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <llvm/IR/Attributes.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
@@ -19,22 +20,29 @@
 #include <vector>
 
 namespace armv5::detail {
-llvm::Value *Lowering::slow_access(
-    Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value) {
-  materialize(values); // Only the dynamic callback path exposes the current prefix.
-  auto *replacement = c64(0);
-  auto role = CallbackBinding::Role::swap;
-  if (operation == 0) { role = CallbackBinding::Role::read; }
-  if (operation == 1) { role = CallbackBinding::Role::write; }
+llvm::Value *Lowering::callback_address(CallbackBinding::Role role) {
   for (const auto &binding : image_.options.callbacks) {
     if (binding.role != role) { continue; }
     llvm::Type *last = ir_.getInt32Ty();
-    if (operation != 1) { last = ir_.getPtrTy(); }
+    if (role != CallbackBinding::Role::write) { last = ir_.getPtrTy(); }
     auto *type = llvm::FunctionType::get(
         ir_.getInt1Ty(), {ir_.getPtrTy(), ir_.getInt32Ty(), ir_.getInt32Ty(), last}, false);
-    auto callback = module_.getOrInsertFunction(binding.symbol, type);
-    replacement = ir_.CreatePtrToInt(callback.getCallee(), ir_.getInt64Ty());
+    return ir_.CreatePtrToInt(module_.getOrInsertFunction(binding.symbol, type).getCallee(),
+                              ir_.getInt64Ty());
   }
+  return c64(0);
+}
+
+llvm::Value *Lowering::slow_access(
+    Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value) {
+  if ((variant_.mapping.control & 1) != 0) {
+    return virtual_access(values, address, width, operation, value);
+  }
+  materialize(values); // Only the dynamic callback path exposes the current prefix.
+  auto role = CallbackBinding::Role::swap;
+  if (operation == 0) { role = CallbackBinding::Role::read; }
+  if (operation == 1) { role = CallbackBinding::Role::write; }
+  auto *replacement = callback_address(role);
   auto *type = llvm::FunctionType::get(ir_.getInt64Ty(),
                                        {ir_.getPtrTy(),
                                         ir_.getInt32Ty(),
@@ -67,6 +75,114 @@ llvm::Value *Lowering::slow_access(
   return ir_.CreateTrunc(result, ir_.getInt32Ty());
 }
 
+llvm::Value *Lowering::virtual_access(
+    Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value) {
+  auto role = operation == 0 ? CallbackBinding::Role::read : CallbackBinding::Role::write;
+  if (operation == 2) { role = CallbackBinding::Role::swap; }
+  const auto &instruction = code_[indices_.at(emitting_pc_)];
+  const bool user_transfer =
+      instruction.operation == Operation::single && (instruction.word & 0x01200000) == 0x00200000;
+  std::vector<llvm::Value *> arguments{
+      runtime_,
+      address,
+      ir_.getInt8(width),
+      c32(operation),
+      value,
+      callback_address(role),
+      callback_address(CallbackBinding::Role::read),
+      access_first_,
+      c32(access_count_),
+      ir_.getInt8(static_cast<std::uint8_t>(mode_ != user_mode && !user_transfer)),
+      ir_.getInt8(0)};
+  std::vector<llvm::Type *> types;
+  types.reserve(arguments.size());
+  for (auto *argument : arguments) { types.push_back(argument->getType()); }
+  auto *type = llvm::FunctionType::get(ir_.getInt64Ty(), types, false);
+  auto *callee = load(ir_.getPtrTy(), offsetof(Runtime, virtual_access));
+  auto invoke = [&]() {
+    auto *call = ir_.CreateCall(type, callee, arguments);
+    for (const auto index : {2U, 9U, 10U}) { call->addParamAttr(index, llvm::Attribute::ZExt); }
+    return call;
+  };
+  auto *probe = invoke();
+  auto *source = ir_.GetInsertBlock();
+  auto *retry = block("virtual.io");
+  auto *completed = block("virtual.result");
+  cold_branch(ir_.CreateICmpNE(load(ir_.getInt32Ty(), offsetof(Runtime, signal)),
+                               c32(static_cast<unsigned>(Signal::mmu_callback))),
+              completed,
+              retry);
+  ir_.SetInsertPoint(retry);
+  materialize(values);
+  store(c32(0), offsetof(Runtime, signal));
+  arguments.back() = ir_.getInt8(1);
+  auto *slow = invoke();
+  auto *retried = ir_.GetInsertBlock();
+  ir_.CreateBr(completed);
+  ir_.SetInsertPoint(completed);
+  auto *result = ir_.CreatePHI(ir_.getInt64Ty(), 2);
+  result->addIncoming(probe, source);
+  result->addIncoming(slow, retried);
+  auto *accepted = block("virtual.accepted");
+  auto *failed = block("virtual.failed");
+  cold_branch(ir_.CreateICmpEQ(ir_.CreateLShr(result, c64(32)), c64(0)), accepted, failed);
+  ir_.SetInsertPoint(failed);
+  finish_exit(values,
+              load(ir_.getInt32Ty(), offsetof(Runtime, signal)),
+              load(ir_.getInt32Ty(), offsetof(Runtime, address)));
+  ir_.SetInsertPoint(accepted);
+  pending_signal_ = load(ir_.getInt32Ty(), offsetof(Runtime, signal));
+  return ir_.CreateTrunc(result, ir_.getInt32Ty());
+}
+
+void Lowering::fetch_instruction(Values &values, llvm::Value *address, unsigned width) {
+  if ((variant_.mapping.control & 1) == 0) { return; }
+  auto *type = llvm::FunctionType::get(ir_.getInt32Ty(),
+                                       {ir_.getPtrTy(),
+                                        ir_.getInt32Ty(),
+                                        ir_.getInt8Ty(),
+                                        ir_.getInt32Ty(),
+                                        ir_.getInt64Ty(),
+                                        ir_.getInt8Ty()},
+                                       false);
+  auto *callee = load(ir_.getPtrTy(), offsetof(Runtime, fetch));
+  auto *read = callback_address(CallbackBinding::Role::read);
+  auto invoke = [&](unsigned callbacks) {
+    auto *call = ir_.CreateCall(
+        type,
+        callee,
+        {runtime_, address, ir_.getInt8(width), c32(mode_), read, ir_.getInt8(callbacks)});
+    for (const auto index : {2U, 5U}) { call->addParamAttr(index, llvm::Attribute::ZExt); }
+    return call;
+  };
+  auto *probe = invoke(0);
+  auto *source = ir_.GetInsertBlock();
+  auto *retry = block("fetch.io");
+  auto *completed = block("fetch.result");
+  cold_branch(
+      ir_.CreateICmpNE(probe, c32(static_cast<unsigned>(Signal::mmu_callback))), completed, retry);
+  ir_.SetInsertPoint(retry);
+  materialize(values);
+  store(c32(0), offsetof(Runtime, signal));
+  auto *slow = invoke(1);
+  auto *retried = ir_.GetInsertBlock();
+  ir_.CreateBr(completed);
+  ir_.SetInsertPoint(completed);
+  auto *signal = ir_.CreatePHI(ir_.getInt32Ty(), 2);
+  signal->addIncoming(probe, source);
+  signal->addIncoming(slow, retried);
+  auto *accepted = block("fetch.accepted");
+  auto *failed = block("fetch.failed");
+  cold_branch(ir_.CreateOr(ir_.CreateICmpEQ(signal, c32(0)),
+                           ir_.CreateICmpEQ(signal, c32(static_cast<unsigned>(Signal::yielded)))),
+              accepted,
+              failed);
+  ir_.SetInsertPoint(failed);
+  finish_exit(values, signal, load(ir_.getInt32Ty(), offsetof(Runtime, address)));
+  ir_.SetInsertPoint(accepted);
+  pending_signal_ = signal;
+}
+
 llvm::Value *
 Lowering::layout_contains(const RegionLayout &region, llvm::Value *address, unsigned width) {
   const auto tcm = tcm_range(tcm_register(variant_.mapping, region.space));
@@ -89,7 +205,7 @@ Lowering::layout_contains(const RegionLayout &region, llvm::Value *address, unsi
 
 llvm::Value *Lowering::access(
     Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value) {
-  if (operation == 2 || variant_.layout.empty()) {
+  if (operation == 2 || variant_.layout.empty() || (variant_.mapping.control & 1) != 0) {
     return slow_access(values, address, width, operation, value);
   }
   auto *previous_signal = pending_signal_;

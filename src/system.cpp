@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Value.h>
 #include <optional>
 
@@ -18,7 +19,7 @@ using Mapping = System::Mapping;
 constexpr auto system_base = offsetof(Runtime, system);
 constexpr auto mapping_base = system_base + offsetof(System, mapping);
 constexpr std::uint32_t processor_id = 0x41069265, cache_type = 0x1d112152, table_mask = 0xffffc000,
-                        process_mask = 0xfe000000;
+                        process_mask = 0xfe000000, tlb_lockdown_mask = 0x1c000001;
 
 struct RegisterSelection {
   unsigned number, selector;
@@ -61,6 +62,7 @@ bool selector_valid(RegisterSelection reg) {
     case 10: return selector == 0;
     case 5:
     case 13: return selector < 2;
+    case 8: return (selector >> 3) >= 5 && (selector >> 3) <= 7 && (selector & 7) < 2;
     case 9: return selector == 0 || selector == 1 || selector == 8 || selector == 9;
     default: return false;
   }
@@ -115,6 +117,7 @@ void Lowering::write_system(const Instruction &instruction, Values &values, std:
       }
       value = tcm_write(instruction, values, value);
       break;
+    case 10: value = ir_.CreateAnd(value, c32(tlb_lockdown_mask)); break;
     case 13:
       if (selector == 0) { value = ir_.CreateAnd(value, c32(process_mask)); }
       break;
@@ -122,6 +125,15 @@ void Lowering::write_system(const Instruction &instruction, Values &values, std:
       refuse(image_.identity, instruction.pc, "CP15 write requires pending memory-system support");
   }
   store(value, offset);
+}
+
+Signal Lowering::system_signal(const Instruction &instruction) {
+  const auto number = (instruction.word >> 16) & 15;
+  const auto selector = ((instruction.word & 15) << 3) | ((instruction.word >> 5) & 7);
+  if (number == 8) { return Signal::mmu_change; }
+  const bool mapping = number == 1 || number == 2 || number == 3 ||
+                       (number == 9 && selector >= 8) || (number == 13 && selector == 0);
+  return mapping ? Signal::mapping_change : Signal::redispatch;
 }
 
 void Lowering::system_transfer(const Instruction &instruction, Values &values) {
@@ -135,6 +147,14 @@ void Lowering::system_transfer(const Instruction &instruction, Values &values) {
   const bool reading = instruction.operation == Operation::system_read;
   const auto offset = register_offset({.number = number, .selector = selector});
   const auto destination = (word >> 12) & 15;
+  if (!reading && number == 8) {
+    auto *type = llvm::FunctionType::get(
+        ir_.getVoidTy(), {ir_.getPtrTy(), ir_.getInt32Ty(), ir_.getInt32Ty()}, false);
+    ir_.CreateCall(type,
+                   load(ir_.getPtrTy(), offsetof(Runtime, invalidate)),
+                   {runtime_, reg(instruction, values, destination), c32(selector & 1)});
+    return;
+  }
   if (!reading) {
     if (!offset) { refuse(image_.identity, instruction.pc, "CP15 register is not writable"); }
     write_system(instruction, values, *offset);

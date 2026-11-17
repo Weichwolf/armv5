@@ -409,6 +409,25 @@ void Lowering::guard(llvm::Value *valid,
   ir_.SetInsertPoint(ordinary);
 }
 
+bool Lowering::exchanges(const Instruction &instruction) const {
+  if (instruction.operation == Operation::alu || instruction.operation == Operation::branch) {
+    return false;
+  }
+  return (instruction.operation != Operation::single &&
+          instruction.operation != Operation::multiple) ||
+         load_exchange();
+}
+
+void Lowering::branch_yield(Values values, llvm::Value *target, bool exchange) {
+  if ((variant_.mapping.control & 1) == 0) { return; }
+  auto *ordinary = block("branch.continue");
+  auto *yielded = block("branch.yield");
+  cold_branch(ir_.CreateICmpEQ(pending_signal_, c32(0)), ordinary, yielded);
+  ir_.SetInsertPoint(yielded);
+  transfer(values, target, exchange, TransferExit::yielded);
+  ir_.SetInsertPoint(ordinary);
+}
+
 void Lowering::signal_guard(const Instruction &instruction,
                             Values values,
                             llvm::Value *old_status) {
@@ -420,7 +439,7 @@ void Lowering::signal_guard(const Instruction &instruction,
   // Faulting accesses have already left before retirement in slow_access.
   if (instruction.terminates) {
     if (!emit_event(instruction, values, old_status, true)) {
-      transfer(values, values.r[15], load_exchange(), TransferExit::yielded);
+      transfer(values, values.r[15], exchanges(instruction), TransferExit::yielded);
     }
   } else {
     finish_exit(values, pending_signal_, load(ir_.getInt32Ty(), offsetof(Runtime, address)));
@@ -457,6 +476,7 @@ void Lowering::unknown_target(Values values, llvm::Value *target, Signal bound_s
   ir_.SetInsertPoint(bound);
   exit(values, bound_signal, target);
   ir_.SetInsertPoint(missing);
+  fetch_instruction(values, target, thumb_ ? 2 : 4);
   exit(values, Signal::unprepared, target);
 }
 
@@ -687,11 +707,13 @@ void Lowering::branch_instruction(const Instruction &instruction, Values values)
     ir_.SetInsertPoint(skipped);
     auto bypass = values;
     bypass.cycles = ir_.CreateAdd(bypass.cycles, c64(1));
+    branch_yield(bypass, c32(instruction.next()), false);
     edge(bypass, instruction.next());
     ir_.SetInsertPoint(taken);
   }
   if (instruction.link) { values.r[14] = c32(instruction.next() | (thumb_ ? 1U : 0U)); }
   values.cycles = ir_.CreateAdd(values.cycles, c64(3));
+  branch_yield(values, c32(instruction.target), instruction.exchange);
   if (instruction.exchange) {
     transfer(values, c32(instruction.target), true);
   } else if (!inline_call(instruction, values)) {
@@ -704,11 +726,7 @@ bool Lowering::emit_event(const Instruction &instruction,
                           llvm::Value *old_status,
                           bool yielded) {
   if (instruction.operation == Operation::system_write) {
-    const auto number = (instruction.word >> 16) & 15;
-    const auto selector = ((instruction.word & 15) << 3) | ((instruction.word >> 5) & 7);
-    const bool mapping = number == 1 || number == 2 || number == 3 ||
-                         (number == 9 && selector >= 8) || (number == 13 && selector == 0);
-    exit(values, mapping ? Signal::mapping_change : Signal::redispatch, c32(instruction.pc));
+    exit(values, system_signal(instruction), c32(instruction.pc));
     return true;
   }
   const bool mode_change = instruction.operation == Operation::msr && instruction.terminates;
@@ -757,6 +775,7 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
   values.r[15] = c32(instruction.pc);
   pending_signal_ = c32(0);
   abort_base_ = nullptr;
+  fetch_instruction(values, c32(instruction.pc), instruction.size);
   if (instruction.operation == Operation::multiple || instruction.operation == Operation::single ||
       instruction.operation == Operation::extra || instruction.operation == Operation::swap) {
     abort_register_ = (instruction.word >> 16) & 15;
@@ -777,6 +796,9 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
     skipped.r[15] = c32(instruction.next());
     skipped.instructions = ir_.CreateAdd(skipped.instructions, c64(1));
     skipped.cycles = ir_.CreateAdd(skipped.cycles, c64(1));
+    if ((variant_.mapping.control & 1) != 0) {
+      guard(ir_.CreateICmpEQ(pending_signal_, c32(0)), skipped, Signal::yielded, skipped.r[15]);
+    }
     jump(merged, skipped);
   } else {
     ir_.CreateBr(taken);
@@ -841,21 +863,15 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
   values.instructions = ir_.CreateAdd(values.instructions, c64(1));
   values.cycles = ir_.CreateAdd(values.cycles, c64(instruction.cycles));
   if (instruction.operation == Operation::single || instruction.operation == Operation::extra ||
-      instruction.operation == Operation::multiple || instruction.operation == Operation::swap) {
+      instruction.operation == Operation::multiple || instruction.operation == Operation::swap ||
+      (variant_.mapping.control & 1) != 0) {
     signal_guard(instruction, values, old_status);
   }
   if (!emit_event(instruction, values, old_status)) { jump(merged, values); }
   ir_.SetInsertPoint(merged.block);
   abort_base_ = nullptr;
   values = merged.values;
-  if (instruction.terminates) {
-    return_transfer(values,
-                    instruction.operation != Operation::alu &&
-                        instruction.operation != Operation::branch &&
-                        ((instruction.operation != Operation::single &&
-                          instruction.operation != Operation::multiple) ||
-                         load_exchange()));
-  }
+  if (instruction.terminates) { return_transfer(values, exchanges(instruction)); }
 }
 
 void Lowering::emit_block(Block &body) {
@@ -938,7 +954,9 @@ void Lowering::emit() {
     }
   }
   ir_.SetInsertPoint(unknown);
-  exit(initial, Signal::unprepared, initial.r[15]);
+  auto absent = initial;
+  fetch_instruction(absent, absent.r[15], thumb_ ? 2 : 4);
+  exit(absent, Signal::unprepared, absent.r[15]);
   for (auto &body : blocks_) { emit_block(body); }
   for (std::size_t index = 0; index < code_.size(); ++index) { emit_tail(index); }
   ir_.SetInsertPoint(exit_.block);

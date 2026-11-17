@@ -4,6 +4,7 @@
 #include "armv5/memory.hpp"
 #include "identity.hpp"
 #include "image.hpp"
+#include "mmu.hpp"
 #include "runtime.hpp"
 #include "system.hpp"
 
@@ -55,6 +56,7 @@ struct Snapshot::Impl {
   State state;
   bool external_entry;
   std::string pending_image;
+  detail::Mmu mmu;
 };
 
 Snapshot::Snapshot(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -105,10 +107,20 @@ struct Core::Impl {
   std::vector<detail::DirectRegion> direct;
   std::vector<HostRange> code_ranges;
   std::string identity, pending_image;
+  detail::Mmu mmu;
+
+  struct CodeBinding {
+    std::uint32_t address, physical, size;
+  };
+
+  std::vector<CodeBinding> code_bindings;
 
   Impl(Memory memory, Io callbacks) : io(callbacks) {
     runtime.owner = this;
     runtime.access = &access;
+    runtime.virtual_access = &virtual_access;
+    runtime.fetch = &fetch;
+    runtime.invalidate = &invalidate;
     rebind(memory);
   }
 
@@ -266,9 +278,22 @@ struct Core::Impl {
       case detail::Signal::prefetch_abort:
         return exception(
             {.vector = 12, .mode = detail::abort_mode}, runtime.address + 4, false, false);
+      case detail::Signal::mmu_prefetch_abort:
+        return exception(
+            {.vector = 12, .mode = detail::abort_mode}, runtime.r[15] + 4, false, true);
+      case detail::Signal::mmu_change:
+        if ((runtime.system.mapping.control & 1) != 0) {
+          revoked = true;
+          revocation_address = runtime.address;
+          runtime.signal = static_cast<std::uint32_t>(detail::Signal::mapping_change);
+          return false;
+        }
+        runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+        return true;
       case detail::Signal::alignment_abort:
         runtime.system.data_fault_status = 1;
-        runtime.system.fault_address = runtime.address;
+        runtime.system.fault_address =
+            detail::Mmu::modified(runtime.system.mapping, runtime.address);
         [[fallthrough]];
       case detail::Signal::data_abort:
         return exception(
@@ -282,6 +307,7 @@ struct Core::Impl {
     binding.reset();
     direct.clear();
     code_ranges.clear();
+    code_bindings.clear();
     runtime.direct = nullptr;
     regions.assign(memory.regions.begin(), memory.regions.end());
     std::ranges::sort(regions, [](const Memory::Region &first, const Memory::Region &second) {
@@ -444,12 +470,202 @@ struct Core::Impl {
     return operation == 0 || operation == 2 ? old : 0;
   }
 
+  struct TableReader {
+    Impl *owner;
+    std::uintptr_t replacement;
+    bool callbacks;
+
+    static detail::Mmu::ReadResult read(void *context, std::uint32_t address) {
+      const auto &reader = *static_cast<TableReader *>(context);
+      auto &owner = *reader.owner;
+      const auto *region = owner.region(address, 4);
+      if (region != nullptr) {
+        if (!region->readable) {
+          return {.status = detail::Mmu::ReadStatus::external_abort, .value = 0};
+        }
+        return {.status = detail::Mmu::ReadStatus::ready,
+                .value = read_bytes(region->bytes.subspan(address - region->address, 4),
+                                    (owner.runtime.system.mapping.control & 0x80) != 0)};
+      }
+      const auto callback = reader.replacement == 0
+                                ? owner.io.read
+                                : std::bit_cast<decltype(owner.io.read)>(reader.replacement);
+      if (callback == nullptr) {
+        return {.status = detail::Mmu::ReadStatus::external_abort, .value = 0};
+      }
+      if (!reader.callbacks) { return {.status = detail::Mmu::ReadStatus::callback, .value = 0}; }
+      std::uint32_t value = 0;
+      if (!callback(owner.io.owner, address, 4, value)) {
+        return {.status = detail::Mmu::ReadStatus::host_fault, .value = 0};
+      }
+      return {.status = detail::Mmu::ReadStatus::ready, .value = value};
+    }
+  };
+
+  bool translation_failure(const detail::Mmu::Translation &translated,
+                           bool instruction,
+                           std::uint32_t address) {
+    using Status = detail::Mmu::Status;
+    const auto status = translated.status;
+    if (status == Status::ready) { return false; }
+    auto signal = detail::Signal::unsupported;
+    runtime.address = address;
+    if (status == Status::callback) { signal = detail::Signal::mmu_callback; }
+    if (status == Status::host_fault) {
+      signal = detail::Signal::memory;
+      runtime.address = translated.fault_address;
+    }
+    if (status == Status::fault) {
+      if (instruction) {
+        runtime.system.instruction_fault_status = translated.fault_status;
+        signal = detail::Signal::mmu_prefetch_abort;
+      } else {
+        runtime.system.data_fault_status = translated.fault_status;
+        runtime.system.fault_address = translated.mva;
+        signal = detail::Signal::data_abort;
+      }
+    }
+    runtime.signal = static_cast<std::uint32_t>(signal);
+    return true;
+  }
+
+  static std::uint64_t virtual_access(detail::Runtime *runtime,
+                                      std::uint32_t address,
+                                      detail::Runtime::Width access_width,
+                                      unsigned operation,
+                                      std::uint32_t value,
+                                      detail::Runtime::DataCallback data_callback,
+                                      detail::Runtime::PageCallback page_callback,
+                                      std::uint32_t first,
+                                      unsigned count,
+                                      detail::Runtime::Privilege privilege,
+                                      detail::Runtime::Callbacks callbacks) noexcept {
+    auto &owner = *static_cast<Impl *>(runtime->owner);
+    const auto width = static_cast<unsigned>(access_width);
+    const auto page_read = static_cast<std::uintptr_t>(page_callback);
+    TableReader reader{.owner = &owner,
+                       .replacement = page_read,
+                       .callbacks = callbacks == detail::Runtime::Callbacks::invoke};
+    const auto replacement = static_cast<std::uintptr_t>(data_callback);
+    auto translated =
+        owner.mmu.translate(runtime->system,
+                            address,
+                            {.privileged = privilege == detail::Runtime::Privilege::privileged,
+                             .writing = operation != 0,
+                             .commit = true},
+                            &TableReader::read,
+                            &reader);
+    if (width == 4) { translated.mva |= first & 3; }
+    if (owner.translation_failure(translated, false, address)) { return access_failure; }
+    const auto storage = owner.storage_address(translated.physical, false);
+    if (owner.region(storage.relative, width, storage.space) == nullptr &&
+        callbacks == detail::Runtime::Callbacks::probe) {
+      bool present = replacement != 0;
+      switch (operation) {
+        case 0: present |= owner.io.read != nullptr; break;
+        case 1: present |= owner.io.write != nullptr; break;
+        case 2: present |= owner.io.swap != nullptr; break;
+        default: break;
+      }
+      if (present) {
+        runtime->signal = static_cast<std::uint32_t>(detail::Signal::mmu_callback);
+        return access_failure;
+      }
+    }
+    const bool was_revoked = owner.revoked;
+    const auto result = access(runtime, translated.physical, width, operation, value, replacement);
+    if (!was_revoked && owner.revoked) {
+      owner.revocation_address = address;
+      runtime->address = address;
+    }
+    if ((result & access_failure) != 0 &&
+        runtime->signal == static_cast<std::uint32_t>(detail::Signal::external_abort)) {
+      const auto start = detail::Mmu::modified(runtime->system.mapping, first);
+      const auto last = start + ((count - 1) * 4);
+      constexpr std::uint32_t page_mask = 0xfffffc00;
+      constexpr std::uint32_t last_word = 0x3fc;
+      const auto first_end = (start & page_mask) == (last & page_mask) ? last : start | last_word;
+      runtime->system.data_fault_status = 8;
+      runtime->system.fault_address =
+          (translated.mva & page_mask) == (start & page_mask) ? first_end : last;
+      runtime->signal = static_cast<std::uint32_t>(detail::Signal::data_abort);
+    }
+    return result;
+  }
+
+  static std::uint32_t fetch(detail::Runtime *runtime,
+                             std::uint32_t address,
+                             detail::Runtime::Width access_width,
+                             unsigned mode,
+                             detail::Runtime::PageCallback page_callback,
+                             detail::Runtime::Callbacks callbacks) noexcept {
+    auto &owner = *static_cast<Impl *>(runtime->owner);
+    const auto width = static_cast<unsigned>(access_width);
+    const auto page_read = static_cast<std::uintptr_t>(page_callback);
+    TableReader reader{.owner = &owner,
+                       .replacement = page_read,
+                       .callbacks = callbacks == detail::Runtime::Callbacks::invoke};
+    auto translated = owner.mmu.translate(
+        runtime->system,
+        address,
+        {.privileged = mode != detail::user_mode, .writing = false, .commit = true},
+        &TableReader::read,
+        &reader);
+    if (translated.status == detail::Mmu::Status::ready) {
+      const auto storage = owner.storage_address(translated.physical, true);
+      const auto *region = owner.region(storage.relative, width, storage.space);
+      if (region == nullptr || !region->readable || !region->executable) {
+        translated.status = detail::Mmu::Status::fault;
+        translated.fault_status = 8;
+      }
+    }
+    if (owner.translation_failure(translated, true, address)) { return runtime->signal; }
+    for (const auto &bound : owner.code_bindings) {
+      if (address >= bound.address &&
+          std::uint64_t(address - bound.address) + width <= bound.size) {
+        if (translated.physical != bound.physical + (address - bound.address)) {
+          owner.revoked = true;
+          owner.revocation_address = address;
+          runtime->signal = static_cast<std::uint32_t>(detail::Signal::changed);
+          runtime->address = address;
+          return runtime->signal;
+        }
+        return runtime->signal;
+      }
+    }
+    runtime->signal = static_cast<std::uint32_t>(detail::Signal::unprepared);
+    runtime->address = address;
+    return runtime->signal;
+  }
+
+  static void
+  invalidate(detail::Runtime *runtime, std::uint32_t address, unsigned single) noexcept {
+    static_cast<Impl *>(runtime->owner)->mmu.invalidate(single != 0, address);
+  }
+
   void validate_code(const detail::Variant &variant) {
     for (const auto &span : variant.spans) {
       std::size_t offset = 0;
       while (offset < span.bytes.size()) {
         const auto address = span.address + static_cast<std::uint32_t>(offset);
-        const auto storage = storage_address(address, true);
+        auto physical = address;
+        auto available = (std::uint64_t{1} << 32) - address;
+        if ((variant.mapping.control & 1) != 0) {
+          TableReader reader{.owner = this, .replacement = 0, .callbacks = false};
+          auto system = runtime.system;
+          const auto translated =
+              mmu.translate(system,
+                            address,
+                            {.privileged = true, .writing = false, .commit = false, .check = false},
+                            &TableReader::read,
+                            &reader);
+          if (translated.status != detail::Mmu::Status::ready) {
+            detail::refuse(identity, address, "declared instruction mapping cannot be validated");
+          }
+          physical = translated.physical;
+          available = translated.available;
+        }
+        const auto storage = storage_address(physical, true);
         const auto *mapping = region(storage.relative, 1, storage.space);
         if (mapping == nullptr || !mapping->readable || !mapping->executable) {
           detail::refuse(identity, address, "declared code is not readable executable memory");
@@ -457,11 +673,14 @@ struct Core::Impl {
         const auto count =
             std::min({std::uint64_t(span.bytes.size() - offset),
                       std::uint64_t(mapping->bytes.size() - (storage.relative - mapping->address)),
-                      storage.available});
+                      storage.available,
+                      available});
         const auto actual = mapping->bytes.subspan(storage.relative - mapping->address, count);
         if (!std::ranges::equal(actual, std::span(span.bytes).subspan(offset, count))) {
           detail::refuse(identity, address, "installed code bytes differ from declared variant");
         }
+        code_bindings.push_back(
+            {.address = address, .physical = physical, .size = static_cast<std::uint32_t>(count)});
         code_ranges.push_back(
             {.address = reinterpret_cast<std::uintptr_t>(actual.data()), .size = actual.size()});
         offset += count;
@@ -683,6 +902,7 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
   impl_->binding.reset();
   impl_->direct.clear();
   impl_->code_ranges.clear();
+  impl_->code_bindings.clear();
   impl_->runtime.direct = nullptr;
   impl_->identity = image.impl_->image->identity;
   const auto &variants = image.impl_->image->variants;
@@ -698,7 +918,7 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
     detail::refuse(
         impl_->identity, impl_->runtime.r[15], "unpredictable TCM geometry/base/overlap");
   }
-  constexpr std::uint32_t implemented_control = 0xa082; // A, B, V and L4.
+  constexpr std::uint32_t implemented_control = 0xa383; // M, A, B, S, R, V and L4.
   if ((found->mapping.control & ~implemented_control) !=
       Registers::System::Mapping::reset_control) {
     detail::refuse(impl_->identity,
@@ -757,7 +977,7 @@ State Core::state() const {
 Snapshot Core::save() const {
   impl_->stopped();
   return Snapshot(std::make_shared<Snapshot::Impl>(
-      impl_->inspect(), impl_->external_entry, impl_->pending_image));
+      impl_->inspect(), impl_->external_entry, impl_->pending_image, impl_->mmu));
 }
 
 void Core::restore(const Snapshot &snapshot) {
@@ -782,6 +1002,7 @@ void Core::restore(const Snapshot &snapshot) {
     impl_->runtime.direct = nullptr;
   }
   impl_->runtime.banks = snapshot.impl_->state.banks;
+  impl_->mmu = snapshot.impl_->mmu;
   impl_->external_entry = snapshot.impl_->external_entry;
   impl_->pending_image = snapshot.impl_->pending_image;
   impl_->runtime.instructions = snapshot.impl_->state.progress.instructions;
@@ -843,6 +1064,7 @@ void Core::reset(std::uint32_t vector) {
   const auto instruction_tcm = impl_->runtime.system.mapping.instruction_tcm & tcm_size_bits;
   const auto data_tcm = impl_->runtime.system.mapping.data_tcm & tcm_size_bits;
   impl_->runtime.system = {};
+  impl_->mmu = {};
   impl_->runtime.system.mapping.instruction_tcm = instruction_tcm;
   impl_->runtime.system.mapping.data_tcm = data_tcm;
   if (impl_->binding &&

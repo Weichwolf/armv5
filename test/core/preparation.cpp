@@ -290,6 +290,7 @@ int main() {
     system_lifecycle();
     tcm_lifecycle();
     control_lifecycle();
+    mmu_lifecycle();
     std::cout << "Installed image lifecycle, cache, callbacks and alias transitions passed\n";
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

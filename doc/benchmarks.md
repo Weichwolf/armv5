@@ -559,3 +559,66 @@ increment. MMU/FCSE/TLB/cache execution and maintenance, debug/prefetch status
 qualification and remaining coprocessor/Jazelle behavior are still open.
 CoreMark, final sanitizers and macOS ARM64 qualification remain pending.
 This is not A5 completion.
+
+
+## MMU, FCSE and unified TLB
+
+Prepared M=1 variants now execute section/coarse/fine translations, large/small/
+tiny pages and mixed subpage permissions. Domain/AP/S/R checks, FCSE, precise
+data/prefetch fault classes, physical TCM selection, unified TLB invalidation and
+eight lockdown slots execute through the same instruction lowering. No decode,
+compilation or code hashing occurs at run time. M=1 memory/fetch helpers preserve
+SSA values on RAM/TLB paths and materialize only for real callbacks. Installation
+peeks without filling or calling I/O; snapshots retain hidden translations and
+replacement continuation. Physical code remaps revoke even when bytes match.
+
+Independent public-interface fixtures cover all seven modes for section loads,
+both byte orders, fixed/dynamic layouts, a domain/AP/S/R privilege truth table,
+LDRT/STRT, all page table shapes, FCSE and TCM routing, precise partial aborts,
+first/second-level walk faults and instruction-fault priority. A review fixture
+exposed lost low FAR bits after word alignment; all four byte offsets now retain
+the original MVA on translation/domain/permission/walk faults. TLB tests cover
+ordinary/locked fills, all invalidate aliases, victim wrap, mixed subpage ranges,
+stale translations across reinstall and snapshots, callback prefix/yield/refusal,
+ARM/Thumb PC-load completion, code aliases and equal/different-byte remaps.
+Existing semantic expectations were retained.
+
+The common K1–K6 programs still use the default M=0 fixed layouts. Their complete
+outputs/hashes and K6's 34,042 IRQs/256-cycle bounds pass. All six native text sizes
+are unchanged from the external-abort increment. K1–K5 retain their rounded
+hardware instruction counts; K6 is 12.7424203 versus 12.7420375 I/GI. This measures
+the common public-interface workload, not M=1 throughput or a no-regression
+qualification for the entire A5 sequence. No K4/ABI tuning was performed.
+
+Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release, warm median-of-three user
+hardware-counter procedure, with `perf_event_paranoid=2` verified operational.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 8.289 | 2.235 | 0.548656 | 1822.637 | 6.956x | 0.115108 | 8,144 | 290.857 |
+| K2 | 6.172 | 1.676 | 0.410270 | 2437.421 | 3.041x | 0.258299 | 17,876 | 259.072 |
+| K3 | 5.646 | 1.487 | 0.355059 | 2816.434 | 0.939x | 0.247045 | 17,081 | 271.127 |
+| K4 | 12.205 | 2.975 | 0.732649 | 1364.909 | 11.987x | 0.737480 | 24,758 | 434.351 |
+| K5 | 8.007 | 2.240 | 0.547678 | 1825.889 | 41.854x | 0.106931 | 5,526 | 502.364 |
+| K6 | 12.742 | 3.920 | 0.977073 | 1023.465 | 12.192x | 0.121551 | 9,030 | 301.000 |
+
+Guest instructions/base cycles per sample are unchanged; native guest share is
+100%. Compiler identity:
+
+```text
+armv5-c38b48b239f5800417c7e6ba727bcc34968d40b7c0840fef90887ba36ffc578a-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites in both the working tree and a
+source-only export, configured tidy/format and five installed SDK consumers.
+The new two-header consumer checks translated loads, stale PTEs, guest TLB
+invalidation, a declared self-transition and hidden-TLB snapshot restoration.
+All 56 build/source/test inputs match the tested export byte-for-byte; the SDK
+library matches the final build. Published totals: `src/` 5,085 (+652), `test/`
+8,129 (+1,319) against the external-abort increment.
+
+Cache execution/maintenance and write-buffer ordering, remaining debug/coprocessor/
+Jazelle behavior and exhaustive profile qualification remain open. Exact declared
+mapping contexts remain required; general M=1 performance is unqualified. CoreMark,
+final own/generated-code sanitizers and macOS ARM64 qualification remain pending.
+This is not A5 completion.

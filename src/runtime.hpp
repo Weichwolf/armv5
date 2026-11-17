@@ -30,7 +30,10 @@ enum class Signal : std::uint8_t {
   yielded_exception_return,
   mapping_change,
   alignment_abort,
-  external_abort
+  external_abort,
+  mmu_callback,
+  mmu_prefetch_abort,
+  mmu_change
 };
 
 struct DirectRegion {
@@ -52,6 +55,28 @@ struct Runtime {
   Access access = nullptr;
   Registers::System system;
   std::uint32_t tcm_status = 0;
+  enum class Width : std::uint8_t { byte = 1, half = 2, word = 4 };
+  enum class DataCallback : std::uintptr_t {};
+  enum class PageCallback : std::uintptr_t {};
+  enum class Privilege : std::uint8_t { user, privileged };
+  enum class Callbacks : std::uint8_t { probe, invoke };
+  using VirtualAccess = std::uint64_t (*)(Runtime *,
+                                          std::uint32_t,
+                                          Width,
+                                          unsigned,
+                                          std::uint32_t,
+                                          DataCallback,
+                                          PageCallback,
+                                          std::uint32_t,
+                                          unsigned,
+                                          Privilege,
+                                          Callbacks) noexcept;
+  VirtualAccess virtual_access = nullptr;
+  using Fetch = std::uint32_t (*)(
+      Runtime *, std::uint32_t, Width, unsigned, PageCallback, Callbacks) noexcept;
+  Fetch fetch = nullptr;
+  using Invalidate = void (*)(Runtime *, std::uint32_t, unsigned) noexcept;
+  Invalidate invalidate = nullptr;
 };
 
 static_assert(std::is_standard_layout_v<Runtime>);

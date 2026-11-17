@@ -54,8 +54,9 @@ contains the control register, translation-table base, domains, FCSE PID and
 instruction/data TCM region registers. Fault-status/address, context ID and
 lockdown registers are separate fields. They are included in state inspection
 and snapshots. The current profile reports r0p5 ID `0x41069265`, 16KB instruction
-and 8KB data caches, four ways and 32-byte lines. Cache/MMU execution effects
-remain pending; reporting geometry does not enable those paths.
+and 8KB data caches, four ways and 32-byte lines. MMU/FCSE translation and TLB
+operations execute as described below. Cache execution effects remain pending;
+reporting geometry does not enable caches.
 
 `CodeVariant::mapping` optionally declares the CP15 assumptions for that coherent
 variant. Omission inherits the reset mapping and `CompileOptions::big_endian`.
@@ -88,6 +89,8 @@ leaves that state and time unchanged. Invalid TCM enable/alignment/overlap write
 are refused before retirement; false predicates suppress those checks/effects.
 
 Enabled ITCM serves instruction and data accesses; enabled DTCM serves data only.
+Their region bases are physical: with M set, translation and permissions precede
+TCM selection.
 Disabling either exposes bus storage without discarding the consumer's TCM bytes.
 A region-register base change relocates the same storage. Fixed TCM layouts are
 still zero-based; their native address bias uses the variant's known guest base.
@@ -96,8 +99,8 @@ Executable validation splits spans at ITCM boundaries. Writes through any host
 alias of actual prepared code revoke the binding, including an ITCM alias.
 Ignoring a write to read-only size bits does not revoke an unchanged binding.
 
-Prepared variants support the A, B, V and L4 control bits. With A set, unaligned
-word/halfword accesses take Data Abort before any memory access or writeback;
+Prepared variants support the M, A, B, S, R, V and L4 control bits. With A set,
+unaligned word/halfword accesses take Data Abort before any memory access or writeback;
 byte accesses remain allowed. The first unaligned transfer address is recorded in
 FAR and DFSR becomes 1; IFSR is preserved. An alignment abort retires no instruction
 and charges the ordinary three-cycle exception entry. Doubleword transfers retain
@@ -121,9 +124,43 @@ host memory fault and leaves DFSR/FAR/IFSR unchanged, including after a partial
 multiple transfer. Missing vector declarations still report the actual vector;
 fault registers already reflect the architectural data abort.
 
-MMU/cache execution effects and maintenance remain open; those configurations
-cannot yet be installed. Debug/prefetch IFSR classification and remaining CP15
-operations are pending. See `isa-coverage.md`.
+With M set, declared instruction addresses and data addresses are virtual. The
+FCSE PID modifies addresses below 32MB; higher addresses remain unchanged.
+Translation supports 1MB sections, coarse/fine tables, 64KB/4KB pages with their
+subpage permissions, and fine-table 1KB tiny pages. Table walks read physical bus
+storage in the selected byte order; a missing RAM descriptor uses the read I/O
+role, including a consumer-linked replacement. Domains and AP/S/R enforce the
+actual privilege, including User permissions for LDRT/STRT. Translation, domain,
+permission, page-walk external and physical external aborts preserve their own
+status classes. Data faults update DFSR/FAR; fetch faults update only IFSR and
+enter Prefetch Abort before instruction retirement. FAR uses the FCSE-modified
+address and retains original byte offsets for A=0 word faults. Alignment faults
+precede translation. A present callback returning false
+is a host fault, not an architectural abort; successful yield completes the
+current instruction, including PC/link/interworking effects.
+
+The ARM926 unified TLB retains 64 ordinary and eight lockdown translations.
+Ordinary replacement is deterministic; physical TLB placement is outside the
+programmer's model. P/Victim in c10 selects locked fills and advances modulo
+eight. c8 c5/c6/c7 operations alias the same unified TLB. Invalidate-all preserves
+locked entries; invalidate-by-MVA removes matching ordinary and locked entries.
+The operand is already an MVA, without another FCSE modification. Page-table
+writes and reinstall do not invalidate translations. Snapshot save/restore
+includes the hidden TLB and replacement continuation; reset clears them.
+
+Installation validates code using existing translations or side-effect-free RAM
+table walks. It never fills a TLB, advances a lockdown victim or calls I/O. A
+mapping that cannot be validated from lent storage is refused. Permissions are
+checked on actual execution, so a declared instruction can take Prefetch Abort.
+Every fetch validates its translation against the installed virtual-to-physical
+binding without decoding or hashing code. A changed physical backing revokes the
+binding even if its bytes match; an undeclared translated alias still refuses.
+TLB maintenance under M=1 revokes through a declared transition, which may target
+the same variant. Variants still require their exact declared CP15 context.
+
+Cache execution/maintenance, debug IFSR qualification and remaining CP15
+operations are pending; cache-enabled configurations cannot yet be installed.
+See `isa-coverage.md`.
 
 ## Execution and snapshots
 
@@ -152,7 +189,7 @@ halves. The prefix retires separately, writes the architectural LR and can be
 snapshotted or interrupted; return resumes its suffix. Preparation rejects
 unpaired halves and external/static branch entries into a suffix. Ordinary
 indirect/interworking branches into a suffix fail explicitly, including at a run
-bound. CP15 state remains A5 work.
+bound. Remaining CP15 effects remain A5 work.
 
 Code changes through guest stores or host aliases revoke dependent bindings.
 Same-value writes do not fabricate a change. Declared transitions identify the
@@ -202,9 +239,9 @@ explicitly. SWI, explicit ARM UDF and BKPT enter Supervisor, Undefined and Prefe
 Abort vectors respectively. ALU S+PC and LDM^ with PC restore SPSR and register
 banks. LDM/STM^ without PC access User banks. User/System SPSR and ^ forms refuse
 preparation. Reset deterministically clears unspecified register/bank values,
-sets CPSR 0xd3 and starts at the supplied aligned vector. MMU-driven prefetch
-aborts, remaining CP15 operations and sleep/resume remain A5 work. Thumb exception
-returns restore T and resume the declared Thumb unit.
+sets CPSR 0xd3 and starts at the supplied aligned vector. Remaining CP15 operations
+and sleep/resume remain A5 work. Thumb exception returns restore T and resume the
+declared Thumb unit.
 
 ## Nominal cycles
 

@@ -7,8 +7,9 @@ banked registers, precise exception entry/return and checked K6 event load;
 A4 adds classic Thumb/interworking, integer/DSP multiplication and all six
 checked kernels. The initial A5 increment adds CP15 register state, context-bound
 variants and separate consumer-owned TCM storage spaces; subsequent increments
-add guest mapping writes, active TCM routing and A/L4/V controls. MMU/cache
-execution and profile completion remain open. See
+add guest mapping writes, active TCM routing and A/L4/V controls. MMU/FCSE
+translation and unified TLB maintenance now execute; cache effects and profile
+completion remain open. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text
@@ -118,10 +119,21 @@ Physical external-abort producers use a distinct internal signal; the lowered
 cold edge records DFSR and the instruction's original/burst MVA before ordinary
 Data Abort entry. Transfer geometry stays in preparation-time SSA metadata and
 is evaluated only on the abort edge. Host callback refusals preserve fault
-registers, and future MMU fault producers retain their own status classification.
+registers, and MMU fault producers retain their own status classification.
 L4 specializes PC-load exchange in ordinary and yielding paths. The owner applies
-V before validating actual vector declarations. MMU/cache effects and maintenance
-remain explicit open work.
+V before validating actual vector declarations.
+
+M=1 uses the same instruction lowering with architectural memory helpers for
+translation and permission checks. No instruction is interpreted. Ordinary RAM
+walks and TLB hits do not materialize SSA registers; a probe leaves cold when a
+real device callback needs the exact prefix, then retries after materialization.
+The read callback role also serves page-table walks for stores and instruction
+fetches. A fetch checks the installed physical dependency before predicate or
+instruction effects. Installation peeks translations without filling the TLB or
+calling I/O. Code changes through translated aliases and physical remaps revoke
+bindings. Unified TLB state and lockdown continuation belong to snapshots, not
+ordinary state inspection. TLB invalidation revokes M=1 bindings through declared
+transitions. Cache effects and maintenance remain explicit open work.
 
 ## ARM926 profile
 

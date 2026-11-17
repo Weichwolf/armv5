@@ -22,6 +22,7 @@ void system_lifecycle();
 void tcm_lifecycle();
 void memory_control();
 void control_lifecycle();
+void mmu_lifecycle();
 
 namespace fixture {
 inline constexpr std::uint32_t user_mode = 0x10, fiq_mode = 0x11, irq_mode = 0x12,

@@ -470,6 +470,7 @@ int main() {
     system_registers();
     memory_control();
     external_aborts();
+    mmu_instructions();
     tcm_accesses();
     preparation_refusals();
     memory_boundaries();
