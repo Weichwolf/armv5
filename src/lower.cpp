@@ -5,6 +5,7 @@
 #include "decode.hpp"
 #include "image.hpp"
 #include "runtime.hpp"
+#include "system.hpp"
 
 #include <algorithm>
 #include <array>
@@ -179,17 +180,39 @@ bool classify_dsp(const Image &image, std::string_view name, Instruction &result
   return true;
 }
 
+bool classify_exchange(const Image &image, std::string_view name, Instruction &result) {
+  constexpr std::array names{"BX", "BXJ", "BLX register"};
+  if (std::ranges::find(names, name) == names.end()) { return false; }
+  const auto word = result.word;
+  if (name == "BLX register" && (word & 15) == 15) {
+    refuse(image.identity, result.pc, "unpredictable BLX PC operand");
+  }
+  result.operation = Operation::exchange;
+  constexpr std::uint32_t bxj_to_bx = 0x30;
+  if (name == "BXJ") { result.word ^= bxj_to_bx; } // Permanently disabled Jazelle: normalize to BX.
+  result.cycles = 3;
+  result.terminates = true;
+  return true;
+}
+
+bool privileged_system(const Instruction &instruction) {
+  const bool reading = instruction.operation == Operation::system_read;
+  const auto number = (instruction.word >> 16) & 15;
+  const bool user_jazelle =
+      jazelle_transfer(instruction.word) && (number == 2 || (number == 0 && reading));
+  return !user_jazelle && (reading || instruction.operation == Operation::system_write);
+}
+
 bool classify_system(std::string_view name, Instruction &result) {
   constexpr std::array names{
       "MRC", "MCR", "MRC2", "MCR2", "CDP", "CDP2", "LDC", "LDC2", "STC", "STC2", "MRRC", "MCRR"};
   if (std::ranges::find(names, name) == names.end()) { return false; }
   const auto word = result.word;
   const auto coprocessor = (word >> 8) & 15;
-  if (coprocessor == 14) { return false; }
   result.operation = Operation::undefined;
   result.cycles = 3;
   result.terminates = true;
-  if (coprocessor == 15 && (name == "MRC" || name == "MCR")) {
+  if ((coprocessor >= 14) && (name == "MRC" || name == "MCR")) {
     result.operation = name == "MRC" ? Operation::system_read : Operation::system_write;
     result.terminates = name == "MCR";
     result.cycles = name == "MRC" && ((word >> 12) & 15) == 15 ? 4 : 1;
@@ -214,7 +237,8 @@ Instruction classify_arm(const Image &image, std::uint32_t pc, std::uint32_t wor
       .pc = pc, .word = word, .operation = Operation::alu, .cycles = 1, .terminates = false};
   if (classify_alu(image, name, result) || classify_memory(image, name, result) ||
       classify_multiple(image, name, result) || classify_multiply(image, name, result) ||
-      classify_dsp(image, name, result) || classify_system(name, result)) {
+      classify_dsp(image, name, result) || classify_exchange(image, name, result) ||
+      classify_system(name, result)) {
     return result;
   }
   if (name == "B" || name == "BL" || name == "BLX immediate") {
@@ -225,15 +249,6 @@ Instruction classify_arm(const Image &image, std::uint32_t pc, std::uint32_t wor
     result.exchange = name == "BLX immediate";
     constexpr unsigned branch_h_shift = 24;
     if (result.exchange) { result.target |= ((word >> branch_h_shift) & 1) * 2 | 1; }
-    result.cycles = 3;
-    result.terminates = true;
-    return result;
-  }
-  if (name == "BX" || name == "BLX register") {
-    if (name == "BLX register" && (word & 15) == 15) {
-      refuse(image.identity, pc, "unpredictable BLX PC operand");
-    }
-    result.operation = Operation::exchange;
     result.cycles = 3;
     result.terminates = true;
     return result;
@@ -584,8 +599,7 @@ void Lowering::read_code() {
       } else {
         auto instruction =
             classify_arm(image_, pc, word_at(span, offset, (variant_.mapping.control & 0x80) != 0));
-        if (mode_ == user_mode && (instruction.operation == Operation::system_read ||
-                                   instruction.operation == Operation::system_write)) {
+        if (mode_ == user_mode && privileged_system(instruction)) {
           instruction.operation = Operation::undefined;
           instruction.cycles = 3;
           instruction.terminates = true;

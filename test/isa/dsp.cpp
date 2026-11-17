@@ -196,6 +196,8 @@ void saturation_and_clz() {
 }
 
 void dsp_instructions() {
+  constexpr std::uint32_t pld = 0xf5d1f000;
+  verify({.word = pld, .cycles = 1}, [](armv5::Registers &) {});
   long_products();
   half_products();
   saturation_and_clz();

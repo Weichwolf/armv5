@@ -1,7 +1,7 @@
 # Target architecture
 
-This is the implementation target, not a completeness claim. A1 provides the
-public Core API, preparation decoder and strict build targets. A2 now has direct
+A1–A5 implement the functional profile qualified in `isa-coverage.md`. A1 provides
+the public Core API, preparation decoder and strict build targets. A2 now has direct
 SSA LLVM execution and cacheable preparation. A3 adds specialized mode units,
 banked registers, precise exception entry/return and checked K6 event load;
 A4 adds classic Thumb/interworking, integer/DSP multiplication and all six
@@ -10,7 +10,8 @@ variants and separate consumer-owned TCM storage spaces; subsequent increments
 add guest mapping writes, active TCM routing and A/L4/V controls. MMU/FCSE
 translation, unified TLB maintenance and functional cache operations now execute.
 Cache contents and timing are not modeled. WFI now stops and resumes through
-the owner interface; remaining profile qualification is open. See
+the owner interface. Trivial Jazelle uses BX fallback and permanently zero J;
+CP14 debug reads zero/ignores writes without a channel or halt model. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text

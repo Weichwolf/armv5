@@ -220,7 +220,7 @@ void Lowering::status_transfer(const Instruction &instruction, Values &values) {
     refuse(image_.identity, instruction.pc, "unpredictable MSR PC operand");
   }
   constexpr std::uint32_t unallocated = 0x06ffff00;
-  constexpr std::uint32_t state = 0x01000020;
+  constexpr std::uint32_t state = 0x20; // J is RAZ/WI in the trivial Jazelle profile.
   constexpr std::uint32_t privileged = 0xdf;
   std::uint32_t bytes = 0;
   for (unsigned index = 0; index < 4; ++index) {

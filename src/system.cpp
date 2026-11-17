@@ -142,6 +142,7 @@ void Lowering::write_system(const Instruction &instruction, Values &values, std:
 }
 
 Signal Lowering::system_signal(const Instruction &instruction) {
+  if (cp14_transfer(instruction.word)) { return Signal::redispatch; }
   const auto number = (instruction.word >> 16) & 15;
   const auto selector = ((instruction.word & 15) << 3) | ((instruction.word >> 5) & 7);
   if (number == 8) { return Signal::mmu_change; }
@@ -188,11 +189,16 @@ void Lowering::system_transfer(const Instruction &instruction, Values &values) {
   const auto word = instruction.word;
   const auto number = (word >> 16) & 15;
   const auto selector = ((word & 15) << 3) | ((word >> 5) & 7);
-  if (((word >> opcode_shift) & 7) != 0 ||
-      !selector_valid({.number = number, .selector = selector})) {
+  const bool cp14 = ((word >> 8) & 15) == 14;
+  if (cp14 && !cp14_transfer(word)) {
+    refuse(image_.identity, instruction.pc, "unsupported CP14 register/operation selector");
+  }
+  if (!cp14 && (((word >> opcode_shift) & 7) != 0 ||
+                !selector_valid({.number = number, .selector = selector}))) {
     refuse(image_.identity, instruction.pc, "unsupported CP15 register/operation selector");
   }
   const bool reading = instruction.operation == Operation::system_read;
+  if (cp14 && !reading) { return; }
   const auto offset = register_offset({.number = number, .selector = selector});
   const auto destination = (word >> 12) & 15;
   if (number == 7) {
@@ -213,7 +219,9 @@ void Lowering::system_transfer(const Instruction &instruction, Values &values) {
     return;
   }
   llvm::Value *value = nullptr;
-  if (number == 0) {
+  if (cp14) {
+    value = c32(0);
+  } else if (number == 0) {
     value = selector == 1 ? c32(cache_type) : c32(processor_id);
     if (selector == 2) { value = load(ir_.getInt32Ty(), offsetof(Runtime, tcm_status)); }
   } else if (offset) {

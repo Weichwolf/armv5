@@ -926,3 +926,77 @@ the installed SDK archive matches the final build. Published `src/` 5,246 (+20),
 A5 remains open for the bounded trivial-Jazelle behavior, disabled-debug profile
 and final coverage table. CoreMark and own/generated-code sanitizers follow A5;
 macOS ARM64 remains untested.
+
+## A5 functional-profile completion
+
+A5 completes the declared functional ARM926EJ-S profile on Linux x86-64:
+ARM/classic Thumb, all seven modes, exceptions, CP15/MMU/FCSE/TLB/TCM,
+functional cache controls/code invalidation and WFI owner wake. Jazelle is the
+architectural trivial implementation: BXJ behaves as BX without changing LR,
+J is permanently zero and the ID/control registers read zero/ignore writes.
+No Java bytecodes execute. Privileged CP14 debug transfers read zero/ignore
+writes; the documented profile deviation is that the DCC W flag never sets.
+User restrictions, unsupported-selector diagnostics and precise Undefined for
+other legal CP14 classes remain. BKPT retains the existing Prefetch Abort path,
+including unchanged IFSR/FAR, without internal halting.
+
+The coverage table names an executing prepared-image fixture for every operation
+and lifecycle row. It records capabilities and excluded electrical/debug/cache
+content models explicitly; no exhaustive encoding Cartesian sweep is claimed.
+The existing generators now include BXJ call/return/interworking, CP14 registers,
+privilege and PSR J writes, unsupported CP14 classes, and a PLD no-access fixture.
+Existing semantic goldens were retained.
+
+Same i5-10400, CPU 2, Clang/LLVM 19.1.7 Release and warm median-of-three user-only
+hardware-counter method (`perf_event_paranoid=2`). Measurements followed the
+qualification jobs; all six complete outputs/hashes, 34,042 K6 IRQs and 256-cycle
+bounds pass. Native guest share is 100%; guest instruction/base-cycle totals and
+native text sizes are unchanged from the WFI increment. This measures the common
+fixed-layout M=0 kernels; general M=1 throughput remains unqualified.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.923 | 2.147 | 0.525636 | 1902.457 | 6.688x | 0.118269 | 8,662 | 309.357 |
+| K2 | 6.202 | 1.659 | 0.407726 | 2452.626 | 2.989x | 0.264939 | 18,503 | 268.159 |
+| K3 | 5.387 | 1.427 | 0.349170 | 2863.932 | 0.923x | 0.270227 | 17,143 | 272.111 |
+| K4 | 12.839 | 3.215 | 0.788767 | 1267.801 | 12.885x | 0.754597 | 25,206 | 442.211 |
+| K5 | 7.607 | 2.117 | 0.517759 | 1931.402 | 40.311x | 0.092952 | 5,528 | 502.545 |
+| K6 | 12.735 | 3.913 | 0.963125 | 1038.287 | 12.277x | 0.123153 | 9,262 | 308.733 |
+
+The pre-A5 comparison remains explicit. K4/K6 increases accompany the MMU/abort
+bookkeeping; they were not tuned during the bounded A5 completion.
+
+| Kernel | Pre-A5 `c112bcf` I/GI | Final A5 I/GI | Change | Pre-A5 cycles/GI | Final A5 cycles/GI | Pre-A5 text bytes | Final A5 text bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.941 | 7.923 | -0.22% | 2.151 | 2.147 | 8,097 | 8,662 |
+| K2 | 6.167 | 6.202 | +0.56% | 1.704 | 1.659 | 16,168 | 18,503 |
+| K3 | 5.408 | 5.387 | -0.38% | 1.413 | 1.427 | 16,833 | 17,143 |
+| K4 | 12.321 | 12.839 | +4.21% | 3.134 | 3.215 | 21,799 | 25,206 |
+| K5 | 7.808 | 7.607 | -2.57% | 2.059 | 2.117 | 5,424 | 5,528 |
+| K6 | 12.378 | 12.735 | +2.89% | 3.744 | 3.913 | 8,772 | 9,262 |
+
+Compiler identity:
+
+```text
+armv5-c3a3d908a297fdd6c09f6b4d87a8d9304b6a0ada652474b0f7425b0183a1a2b7-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release; ISA/core/bench in the working tree and source-only
+export; configured clang-tidy/clang-format; ten separately built installed SDK
+consumers using only the two public headers. After the final two-line PLD fixture,
+ISA was rerun in both builds; production, core and benchmark inputs were unchanged.
+All 60 build/source/test inputs and contract v8 match the export byte-for-byte;
+the installed SDK archive matches the final build. The tenth consumer checks
+CP14 zero/ignored writes, BXJ to Thumb, unchanged LR, J=0 and snapshot replay.
+
+Published totals: `src/` 5,281 (+35), `test/` 9,183 (+67) against `0a75d12`.
+The complete bounded remainder after `d1ea576` is +55 production/+299 test lines,
+including WFI. The full A5 series against pre-A5 `c112bcf` adds 1,404 production
+and 4,576 test lines, counting all versioned text under `src/` and `test/`.
+
+A5 is complete for the declared functional profile. Next, before CoreMark:
+retain guest registers across units, provide full virtual address-space backing
+including MMU views, then cross-unit flag liveness. Each optimization requires
+all six checked outputs and a separate measured comparison. Own/generated-code
+ASan/UBSan and separate TSan qualification remain pending. macOS ARM64 is untested;
+no developer host was available. The overall work remains open for those steps.

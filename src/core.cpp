@@ -1013,8 +1013,8 @@ void Core::set_registers(const Registers &registers) {
   }
   impl_->save_bank(impl_->runtime.banks);
   impl_->runtime.r = registers.r;
-  impl_->runtime.cpsr = registers.cpsr;
-  impl_->runtime.spsr = registers.spsr;
+  impl_->runtime.cpsr = registers.cpsr & ~jazelle_bit;
+  impl_->runtime.spsr = registers.spsr & ~jazelle_bit;
   constexpr std::uint32_t tcm_size_bits = 0x3c;
   auto system = registers.system;
   system.mapping.instruction_tcm = (system.mapping.instruction_tcm & ~tcm_size_bits) |

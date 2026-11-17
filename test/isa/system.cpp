@@ -211,6 +211,50 @@ void wait_for_interrupt(bool big, bool fixed) {
                    "reset clears WFI without completing or preserving the wait");
 }
 
+void coprocessor_registers(unsigned number, bool big, std::uint32_t mode, bool jazelle = true) {
+  constexpr std::uint32_t write = 0xeee00e10;
+  constexpr std::uint32_t read = 0x00100000;
+  constexpr std::uint32_t destination = 0xf000;
+  constexpr std::uint32_t j_bit = 0x01000000;
+  constexpr std::uint32_t write_saved = 0xe168f000;
+  constexpr std::uint32_t read_flags = 0xe10f2000;
+  constexpr std::uint32_t write_current = 0xe128f000;
+  constexpr std::uint32_t all_flags = 0xf8000000;
+  constexpr std::uint32_t mode_mask = 31;
+  fixture::Program code(0x1000, big);
+  constexpr std::uint32_t debug = 0xee000e10;
+  const auto transfer = (jazelle ? write : debug) | (number << 16);
+  const bool user = mode == fixture::user_mode;
+  code.word(user && number == 0 ? fixture::data(13, false, 0, 0, false, 0) : transfer);
+  code.word(transfer | read | 0x1000);
+  code.word(transfer | read | destination);
+  if (!user) {
+    code.word(read_flags);
+    code.word(write_saved);
+    code.word(write_current);
+  }
+  armv5::Registers::System::Mapping mapping;
+  mapping.control |= big ? 0x80 : 0;
+  fixture::Modes machine({{.program = code, .modes = {mode}}}, {}, true, 4096, {}, mapping);
+  auto registers = machine.core->registers();
+  registers.cpsr = (initial_status & ~mode_mask) | mode | j_bit;
+  registers.spsr = j_bit | (user ? 0 : mode);
+  registers.r[0] = j_bit | 1;
+  machine.core->set_registers(registers);
+  auto expected = registers;
+  expected.cpsr &= ~j_bit & (user ? non_flags : ~all_flags);
+  expected.spsr &= ~j_bit;
+  expected.r[1] = 0;
+  if (!user) { expected.r[2] = registers.cpsr & non_flags & ~j_bit; }
+  expected.r[15] = code.pc();
+  const auto result = machine.core->run(user ? 3 : 6);
+  fixture::require(machine.core->registers() == expected &&
+                       result.progress == armv5::Progress{.instructions = user ? 3U : 6U,
+                                                          .base_cycles = user ? 6U : 10U},
+                   "disabled CP14 registers ignore writes/read zero, PC reads change only NZCV, "
+                   "and host/native PSR writes cannot enable J state");
+}
+
 struct UndefinedCase {
   std::uint32_t instruction, mode;
 };
@@ -252,6 +296,21 @@ void system_registers() {
   identification(true);
   writable_state();
   flags_and_predication();
+  constexpr std::uint32_t write_jid = 0xeee00e10;
+  constexpr std::uint32_t read_os = 0xeef10e10;
+  undefined_access({.instruction = write_jid, .mode = fixture::user_mode});
+  undefined_access({.instruction = read_os, .mode = fixture::user_mode});
+  constexpr std::uint32_t debug_read = 0xee100e10;
+  constexpr std::uint32_t debug_write = 0xee010e10;
+  undefined_access({.instruction = debug_read, .mode = fixture::user_mode});
+  undefined_access({.instruction = debug_write, .mode = fixture::user_mode});
+  for (const bool big : {false, true}) {
+    for (unsigned number = 0; number < 3; ++number) {
+      coprocessor_registers(number, big, fixture::supervisor_mode);
+      coprocessor_registers(number, big, fixture::supervisor_mode, false);
+      if (number != 1) { coprocessor_registers(number, big, fixture::user_mode); }
+    }
+  }
   constexpr std::uint32_t wait = 0xee070f90;
   undefined_access({.instruction = wait, .mode = fixture::user_mode});
   for (const bool big : {false, true}) {

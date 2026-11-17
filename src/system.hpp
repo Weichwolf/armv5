@@ -9,6 +9,19 @@ namespace armv5::detail {
 inline constexpr std::uint32_t control_writable = 0xf387, tcm_base_mask = 0xfffff000,
                                tcm_size_mask = 0x3c, tcm_writable = 0xfffff001;
 
+[[nodiscard]] inline bool cp14_transfer(std::uint32_t word) {
+  constexpr std::uint32_t mask = 0x0fe00fff;
+  constexpr std::uint32_t debug = 0x0e000e10;
+  constexpr std::uint32_t jazelle = 0x0ee00e10;
+  const auto encoding = word & mask;
+  return (encoding == debug || encoding == jazelle) && ((word >> 16) & 15) <= 2;
+}
+
+[[nodiscard]] inline bool jazelle_transfer(std::uint32_t word) {
+  constexpr std::uint32_t opcode_mask = 0x00e00000;
+  return cp14_transfer(word) && (word & opcode_mask) == opcode_mask;
+}
+
 [[nodiscard]] inline bool same_mapping(Registers::System::Mapping first,
                                        Registers::System::Mapping second) {
   constexpr std::uint32_t tcm_size_bits = 0x3c;

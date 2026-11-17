@@ -16,10 +16,11 @@ namespace {
 constexpr std::uint32_t entry = 0x1000, alternative = 0x100c, callee = 0x1020,
                         thumb_target = 0x1051, undeclared = 0x9000, stack_pointer = 0x4020;
 constexpr std::uint32_t bx_lr = 0xe12fff1e;
+constexpr std::uint32_t bxj_lr = 0xe12fff2e;
 constexpr std::uint16_t thumb_move = 0x2003;
 constexpr std::uint32_t callback_address = 0x20000, callback_value = 0xaabbccdd;
 
-enum class ReturnForm : std::uint8_t { bx, move, load, multiple };
+enum class ReturnForm : std::uint8_t { bx, bxj, move, load, multiple };
 
 bool stacked(ReturnForm form) {
   return form == ReturnForm::load || form == ReturnForm::multiple;
@@ -40,7 +41,9 @@ fixture::Program program(ReturnForm form, unsigned condition = 14) {
                                            : fixture::transfer(true, false, 15, 13, 4, false));
   } else {
     code.word(fixture::data(13, false, 14, 0, false, 2));
-    code.word(form == ReturnForm::move ? fixture::data(13, false, 15, 0, false, 14) : bx_lr);
+    auto returning = form == ReturnForm::bxj ? bxj_lr : bx_lr;
+    if (form == ReturnForm::move) { returning = fixture::data(13, false, 15, 0, false, 14); }
+    code.word(returning);
   }
   return code;
 }
@@ -357,8 +360,11 @@ void call_returns() {
   callback_prefix();
   predicated_call(false);
   predicated_call(true);
-  for (const auto form :
-       {ReturnForm::bx, ReturnForm::move, ReturnForm::load, ReturnForm::multiple}) {
+  for (const auto form : {ReturnForm::bx,
+                          ReturnForm::bxj,
+                          ReturnForm::move,
+                          ReturnForm::load,
+                          ReturnForm::multiple}) {
     fixture::Program compressed(thumb_target & ~std::uint32_t{1});
     compressed.half(thumb_move);
     fixture::Modes machine({{.program = program(form), .modes = {fixture::supervisor_mode}},

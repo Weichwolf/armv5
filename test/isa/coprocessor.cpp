@@ -79,7 +79,7 @@ Program program(unsigned coprocessor, bool big) {
   for (const auto form : forms) {
     for (const auto predicate : {0U, 14U, 15U}) {
       if ((predicate == 15 && !form.unconditional) ||
-          (coprocessor == 15 && form.register_transfer && predicate != 15)) {
+          (coprocessor >= 14 && form.register_transfer && predicate != 15)) {
         continue;
       }
       fixture::Program code(address, big);
@@ -148,7 +148,7 @@ void execute_case(fixture::Modes &machine, const Calls &calls, Case test, Input 
   const auto result = machine.core->run(2);
   fixture::require(machine.core->state() == expected && result.progress == expected.progress &&
                        calls.count == 0 && machine.ram == ram,
-                   "absent external/illegal CP15 class preserves exact ADDS prefix, banks, "
+                   "absent external/unsupported internal class preserves exact ADDS prefix, banks, "
                    "fault registers and memory; no transfer, callback or writeback");
   if (!trapped) { return; }
   returned.banks.undefined[1] = returned.registers.r[15];
@@ -199,7 +199,6 @@ void absence(Configuration configuration) {
 
 void coprocessor_instructions() {
   for (unsigned coprocessor = 0; coprocessor < 16; ++coprocessor) {
-    if (coprocessor == 14) { continue; } // Internal debug operations remain separate.
     for (const bool big : {false, true}) {
       for (const bool fixed : {false, true}) {
         absence({.coprocessor = coprocessor, .big = big, .fixed = fixed});

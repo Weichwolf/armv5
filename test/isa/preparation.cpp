@@ -430,6 +430,7 @@ void preparation_refusals() {
   };
 
   constexpr std::array cases{
+      Case{.word = 0xee100e30, .reason = "unsupported CP14 register/operation selector"},
       Case{.word = 0xe6bf0f31, .reason = "undefined media"},
       Case{.word = 0xe1900f9f, .reason = "swap/exclusive"},
       Case{.word = 0xe0400291, .reason = "undefined multiply"},

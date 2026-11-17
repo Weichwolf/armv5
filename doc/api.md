@@ -2,8 +2,8 @@
 
 The installed headers are `armv5/core.hpp` and `armv5/memory.hpp`; the CMake package
 exports `armv5::core`. Addresses, memory sizes and PCs are bytes. No LLVM type or
-native entry ABI appears in these headers. ARM926 profile completion remains
-open; see `isa-coverage.md` for the implemented ARM subset and outstanding modes.
+native entry ABI appears in these headers. The functional ARM926 profile and its
+explicit cache, Jazelle and debug capabilities are qualified in `isa-coverage.md`.
 
 ## Preparation and ownership
 
@@ -189,8 +189,7 @@ once and leaves cold before its successor. The consumer must declare a matching
 transition at that successor and revalidate by installing the appropriate variant.
 An undeclared invalidation reports changed code at the maintenance instruction.
 Snapshots preserve pending transitions; there is no hidden cache content to save
-or rebind. WFI behavior is described below; remaining debug/Jazelle qualification
-is still open.
+or rebind. WFI behavior is described below.
 
 The profile has no external coprocessors in slots 0–13. Their MRC/MCR, CDP,
 LDC/STC and MCRR/MRRC instructions take Undefined before operand transfer, memory
@@ -199,8 +198,22 @@ regardless of NZCV. CP15 accepts privileged ordinary MRC/MCR; its other legal
 ARMv5 instruction classes take Undefined. A false ordinary predicate suppresses
 the exception. Unsupported CP15 register selectors retain explicit preparation
 refusals; this does not invent defined behavior for unpredictable selectors.
-ARMv6 MCRR2/MRRC2 are outside this profile and cannot be prepared. Internal CP14
-debug behavior remains pending and is not treated as an absent external device.
+ARMv6 MCRR2/MRRC2 are outside this profile and cannot be prepared.
+
+Jazelle is the architecture's trivial implementation: BXJ behaves as BX, preserves
+LR and exchanges ARM/Thumb from the target. J reads zero and ignores writes in
+CPSR/SPSR, including `set_registers`; Java bytecodes cannot execute. CP14 ordinary
+opcode_1=7 ID/OS/Main registers (CRn=0/1/2, CRm=0, opcode_2=0) read zero/ignore
+writes. User ID reads and Main accesses are accepted, while ID writes and OS
+accesses take Undefined. The unpredictable User Main read returns zero here.
+
+CP14 ordinary opcode_1=0 debug registers at CRn=0..2, CRm=0, opcode_2=0 read zero
+and ignore privileged writes; User access takes Undefined. This profile does not
+retain DCC state, so the hardware channel's W flag stays zero after a write.
+MRC R15 updates NZCV only. Other legal CP14 instruction classes take Undefined;
+unsupported register selectors refuse preparation. BKPT takes Prefetch Abort
+without an internal halt, retaining IFSR/FAR. See `isa-coverage.md` for references
+and the explicit disabled-debug profile choice.
 
 ## Execution and snapshots
 
@@ -251,7 +264,7 @@ halves. The prefix retires separately, writes the architectural LR and can be
 snapshotted or interrupted; return resumes its suffix. Preparation rejects
 unpaired halves and external/static branch entries into a suffix. Ordinary
 indirect/interworking branches into a suffix fail explicitly, including at a run
-bound. Remaining CP15 effects remain A5 work.
+bound.
 
 Code changes through guest stores or host aliases revoke dependent bindings.
 Same-value writes do not fabricate a change. Declared transitions identify the
@@ -301,9 +314,8 @@ explicitly. SWI, explicit ARM UDF and BKPT enter Supervisor, Undefined and Prefe
 Abort vectors respectively. ALU S+PC and LDM^ with PC restore SPSR and register
 banks. LDM/STM^ without PC access User banks. User/System SPSR and ^ forms refuse
 preparation. Reset deterministically clears unspecified register/bank values,
-sets CPSR 0xd3 and starts at the supplied aligned vector. Remaining CP15 operations
-remain A5 work. Thumb exception returns restore T and resume the
-declared Thumb unit.
+sets CPSR 0xd3 and starts at the supplied aligned vector. Thumb exception returns
+restore T and resume the declared Thumb unit.
 
 ## Nominal cycles
 

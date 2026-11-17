@@ -3,11 +3,14 @@
 Independent ARMv5 native translation library, initially targeting the ARM926EJ-S
 programmer-visible profile. C++23, LLVM 19, GPL-3.0-only.
 
-The library executes prepared ARM images through direct LLVM SSA lowering,
-including arithmetic/flags, branches and memory transfers. Preparation is
-cacheable and consumers can link their own IR before native binding. Checked
-K4/K5 kernels measure hardware counters through the public interface. The complete
-ARM926 profile is still under development; unsupported forms refuse explicitly.
+The library executes prepared ARM and classic Thumb images through direct LLVM
+SSA lowering, including integer/DSP arithmetic, exceptions and the ARM926 memory
+system. Preparation is cacheable and consumers can link their own IR before
+native binding. All six
+common kernels check their complete outputs and measure hardware counters through
+the public interface. The functional A5 profile uses trivial Jazelle (BXJ as BX,
+no Java execution), disabled debug and cache controls without stored cache
+contents. Unsupported forms refuse explicitly.
 There is no interpreter fallback. See [coverage](doc/isa-coverage.md),
 [API status](doc/api.md), [objective](OBJECTIVE.md) and
 [target architecture](doc/architecture.md).
@@ -29,11 +32,11 @@ cmake --install build --prefix /your/prefix
 ```
 
 Consumers use `find_package(armv5 CONFIG REQUIRED)` and link `armv5::core`.
-Linux x86-64 execution of the listed ARM subset is validated; macOS ARM64 remains untested.
-Implementation follows milestones A1–A5 in Weichwolf/lead-a1-src#2. A2 provides
-installed-image ARM execution, cacheable LLVM artifacts and K4/K5; exceptions/K6
-remain A3 work, Thumb/DSP/K1–K3 A4, and the ARM926 memory system A5. Hardware user
-counters are accessible on Linux; see [benchmark definitions](test/bench/README.md)
+Linux x86-64 execution of the declared functional profile is validated; macOS
+ARM64 remains untested. Milestones A1–A5 are implemented. Register retention
+across units, full address-space backing/MMU views and cross-unit flag liveness
+follow before CoreMark; own/generated-code sanitizer qualification is pending.
+Hardware user counters are accessible on Linux; see [benchmark definitions](test/bench/README.md)
 and the [measured baseline](doc/benchmarks.md) for checked, reproducible reports.
 
 ## References
