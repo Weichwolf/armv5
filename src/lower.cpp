@@ -528,8 +528,10 @@ void Lowering::transfer(Values values,
       edge(values, index.pc);
     }
   }
+  std::set<std::uint32_t> destinations;
   for (const auto &transition : image_.transitions) {
-    if (transition.source_variant != variant_.id || indices_.contains(transition.address)) {
+    if (transition.source_variant != variant_.id || indices_.contains(transition.address) ||
+        !destinations.insert(transition.address).second) {
       continue;
     }
     auto *case_block = block("variant.target");
@@ -698,7 +700,11 @@ bool Lowering::emit_event(const Instruction &instruction,
                           llvm::Value *old_status,
                           bool yielded) {
   if (instruction.operation == Operation::system_write) {
-    exit(values, Signal::redispatch, values.r[15]);
+    const auto number = (instruction.word >> 16) & 15;
+    const auto selector = ((instruction.word & 15) << 3) | ((instruction.word >> 5) & 7);
+    const bool mapping = number == 1 || number == 2 || number == 3 ||
+                         (number == 9 && selector >= 8) || (number == 13 && selector == 0);
+    exit(values, mapping ? Signal::mapping_change : Signal::redispatch, c32(instruction.pc));
     return true;
   }
   const bool mode_change = instruction.operation == Operation::msr && instruction.terminates;

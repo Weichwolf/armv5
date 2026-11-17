@@ -190,6 +190,9 @@ private:
   void set_user_reg(Values &values, unsigned index, llvm::Value *value) const;
   void status_transfer(const Instruction &instruction, Values &values);
   void system_transfer(const Instruction &instruction, Values &values);
+  void write_system(const Instruction &instruction, Values &values, std::size_t offset);
+  llvm::Value *tcm_write(const Instruction &instruction, Values &values, llvm::Value *input);
+  llvm::Value *layout_contains(const RegionLayout &region, llvm::Value *address, unsigned width);
   llvm::Value *access(
       Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value);
   llvm::Value *slow_access(

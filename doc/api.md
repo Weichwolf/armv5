@@ -75,10 +75,29 @@ their geometry. Disabled TCM storage is excluded from ordinary bus accesses.
 Snapshots contain the CP15 region state, not the lent bytes; restoring across a
 different TCM geometry is rejected before processor state changes.
 
-This first A5 increment implements CP15 register reads, software writes of the
-fault/context registers, privilege and absent MRC/MCR coprocessor traps, and these
-storage/binding rules. Active TCM, alignment/high-vector/MMU/cache control and
-mapping/maintenance writes still fail explicitly. Architectural fault-register
+Guest MCR writes to control, TTBR, domains, FCSE PID and TCM region registers
+canonicalize their defined fields and end the current unit. An unchanged context
+continues normally. A changed context revokes the binding after the completed
+instruction and takes a declared `CodeTransition` at the next PC; without one it
+reports a changed-context fault identifying the MCR. Multiple transitions at the
+same source/PC are allowed when their destination CP15 contexts are distinct;
+actual processor state selects the matching destination. Equivalent contexts
+remain ambiguous, including differences only in disabled TCM size bits. Pending transitions and the
+new processor mapping are snapshot state. Installation of the matching variant
+leaves that state and time unchanged. Invalid TCM enable/alignment/overlap writes
+are refused before retirement; false predicates suppress those checks/effects.
+
+Enabled ITCM serves instruction and data accesses; enabled DTCM serves data only.
+Disabling either exposes bus storage without discarding the consumer's TCM bytes.
+A region-register base change relocates the same storage. Fixed TCM layouts are
+still zero-based; their native address bias uses the variant's known guest base.
+Bus proofs exclude active overlays even if no fixed TCM layout was supplied.
+Executable validation splits spans at ITCM boundaries. Writes through any host
+alias of actual prepared code revoke the binding, including an ITCM alias.
+Ignoring a write to read-only size bits does not revoke an unchanged binding.
+
+Alignment/high-vector/MMU/cache execution effects and maintenance remain open;
+those configurations cannot yet be installed. Architectural fault-register
 updates and the remaining CP15 operations are pending. See `isa-coverage.md`.
 
 ## Execution and snapshots

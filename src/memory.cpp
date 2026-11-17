@@ -5,6 +5,7 @@
 #include "image.hpp"
 #include "lower.hpp"
 #include "runtime.hpp"
+#include "system.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -14,6 +15,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/Support/Alignment.h>
+#include <utility>
 #include <vector>
 
 namespace armv5::detail {
@@ -54,6 +56,26 @@ llvm::Value *Lowering::slow_access(
   return ir_.CreateTrunc(result, ir_.getInt32Ty());
 }
 
+llvm::Value *
+Lowering::layout_contains(const RegionLayout &region, llvm::Value *address, unsigned width) {
+  const auto tcm = tcm_range(tcm_register(variant_.mapping, region.space));
+  const auto base = region.address + (region.space == Memory::Space::bus ? 0U : tcm.base);
+  auto *wide_address = ir_.CreateZExt(address, ir_.getInt64Ty());
+  // Unsigned underflow rejects addresses below the region in the same compare.
+  auto *offset = ir_.CreateSub(wide_address, c64(base));
+  auto *within =
+      region.size < width ? ir_.getFalse() : ir_.CreateICmpULE(offset, c64(region.size - width));
+  if (region.space == Memory::Space::bus) {
+    for (const auto space : {Memory::Space::itcm, Memory::Space::dtcm}) {
+      const auto overlay = tcm_range(tcm_register(variant_.mapping, space));
+      if (overlay.size == 0) { continue; }
+      within = ir_.CreateAnd(
+          within, ir_.CreateICmpUGE(ir_.CreateSub(address, c32(overlay.base)), c32(overlay.size)));
+    }
+  }
+  return within;
+}
+
 llvm::Value *Lowering::access(
     Values &values, llvm::Value *address, unsigned width, unsigned operation, llvm::Value *value) {
   if (operation == 2 || variant_.layout.empty()) {
@@ -69,18 +91,17 @@ llvm::Value *Lowering::access(
   for (std::size_t index = 0; index < variant_.layout.size(); ++index) { order.push_back(index); }
   std::ranges::stable_sort(order, {}, [&](std::size_t index) {
     const auto &region = variant_.layout[index];
-    return !region.readable || !region.writable || region.executable;
+    return std::pair{region.space == Memory::Space::bus,
+                     !region.readable || !region.writable || region.executable};
   });
   for (const auto index : order) {
     const auto &region = variant_.layout[index];
-    if (region.space != Memory::Space::bus) { continue; }
+    const auto tcm = tcm_range(tcm_register(variant_.mapping, region.space));
+    if (region.space != Memory::Space::bus && tcm.size == 0) { continue; }
     auto *mapped = block("memory.direct");
     auto *next = block("memory.next");
     auto *wide_address = ir_.CreateZExt(address, ir_.getInt64Ty());
-    // Unsigned underflow rejects addresses below the region in the same compare.
-    auto *offset = ir_.CreateSub(wide_address, c64(region.address));
-    auto *within =
-        region.size < width ? ir_.getFalse() : ir_.CreateICmpULE(offset, c64(region.size - width));
+    auto *within = layout_contains(region, address, width);
     ir_.CreateCondBr(within, mapped, next);
     ir_.SetInsertPoint(mapped);
     const bool allowed = operation == 0 ? region.readable : region.writable;

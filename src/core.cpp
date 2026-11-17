@@ -5,6 +5,7 @@
 #include "identity.hpp"
 #include "image.hpp"
 #include "runtime.hpp"
+#include "system.hpp"
 
 #include <algorithm>
 #include <array>
@@ -62,15 +63,6 @@ namespace {
 constexpr std::uint64_t access_failure = std::uint64_t{1} << 32;
 constexpr std::uint32_t mode_bits = 0x1f, execution_bits = 0x01000020, thumb_bit = 0x20,
                         jazelle_bit = 0x01000000, byte_mask = 255;
-
-bool same_mapping(Registers::System::Mapping first, Registers::System::Mapping second) {
-  constexpr std::uint32_t tcm_size_bits = 0x3c;
-  if ((first.instruction_tcm & 1) == 0) { first.instruction_tcm &= ~tcm_size_bits; }
-  if ((second.instruction_tcm & 1) == 0) { second.instruction_tcm &= ~tcm_size_bits; }
-  if ((first.data_tcm & 1) == 0) { first.data_tcm &= ~tcm_size_bits; }
-  if ((second.data_tcm & 1) == 0) { second.data_tcm &= ~tcm_size_bits; }
-  return first == second;
-}
 
 struct HostRange {
   std::uintptr_t address;
@@ -251,6 +243,15 @@ struct Core::Impl {
         runtime.r[15] &= (runtime.cpsr & thumb_bit) != 0 ? ~std::uint32_t{1} : ~std::uint32_t{3};
         runtime.signal = static_cast<std::uint32_t>(detail::Signal::yielded);
         return false;
+      case detail::Signal::mapping_change:
+        if (!detail::same_mapping(runtime.system.mapping,
+                                  binding->image->variants[variant_index].mapping)) {
+          revoked = true;
+          revocation_address = runtime.address;
+          return false;
+        }
+        runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
+        return true;
       case detail::Signal::redispatch:
         runtime.signal = static_cast<std::uint32_t>(detail::Signal::none);
         return true;
@@ -327,6 +328,31 @@ struct Core::Impl {
     return nullptr;
   }
 
+  struct StorageAddress {
+    Memory::Space space;
+    std::uint32_t relative;
+    std::uint64_t available;
+  };
+
+  [[nodiscard]] StorageAddress storage_address(std::uint32_t address, bool fetch) const {
+    StorageAddress result{.space = Memory::Space::bus,
+                          .relative = address,
+                          .available = (std::uint64_t{1} << 32) - address};
+    for (const auto space : {Memory::Space::itcm, Memory::Space::dtcm}) {
+      if (fetch && space == Memory::Space::dtcm) { continue; }
+      const auto range = detail::tcm_range(detail::tcm_register(runtime.system.mapping, space));
+      if (range.contains(address)) {
+        return {.space = space,
+                .relative = address - range.base,
+                .available = range.size - (address - range.base)};
+      }
+      if (range.size != 0 && address < range.base) {
+        result.available = std::min(result.available, std::uint64_t(range.base - address));
+      }
+    }
+    return result;
+  }
+
   [[nodiscard]] bool code_overlap(std::span<const std::byte> bytes) const {
     const HostRange access{.address = reinterpret_cast<std::uintptr_t>(bytes.data()),
                            .size = bytes.size()};
@@ -379,7 +405,8 @@ struct Core::Impl {
                               std::uint32_t value,
                               std::uintptr_t replacement) noexcept {
     auto &owner = *static_cast<Impl *>(runtime->owner);
-    const auto *region = owner.region(address, width);
+    const auto storage = owner.storage_address(address, false);
+    const auto *region = owner.region(storage.relative, width, storage.space);
     if (region == nullptr) {
       return owner.callback({.address = address,
                              .width = width,
@@ -392,7 +419,7 @@ struct Core::Impl {
       runtime->address = address;
       return access_failure;
     }
-    auto bytes = region->bytes.subspan(address - region->address, width);
+    auto bytes = region->bytes.subspan(storage.relative - region->address, width);
     const bool big_endian =
         (owner.binding->image->variants[owner.variant_index].mapping.control & 0x80) != 0;
     const bool aliases_code = operation != 0 && owner.code_overlap(bytes);
@@ -416,13 +443,16 @@ struct Core::Impl {
       std::size_t offset = 0;
       while (offset < span.bytes.size()) {
         const auto address = span.address + static_cast<std::uint32_t>(offset);
-        const auto *mapping = region(address, 1);
+        const auto storage = storage_address(address, true);
+        const auto *mapping = region(storage.relative, 1, storage.space);
         if (mapping == nullptr || !mapping->readable || !mapping->executable) {
           detail::refuse(identity, address, "declared code is not readable executable memory");
         }
-        const auto count = std::min(span.bytes.size() - offset,
-                                    mapping->bytes.size() - (address - mapping->address));
-        const auto actual = mapping->bytes.subspan(address - mapping->address, count);
+        const auto count =
+            std::min({std::uint64_t(span.bytes.size() - offset),
+                      std::uint64_t(mapping->bytes.size() - (storage.relative - mapping->address)),
+                      storage.available});
+        const auto actual = mapping->bytes.subspan(storage.relative - mapping->address, count);
         if (!std::ranges::equal(actual, std::span(span.bytes).subspan(offset, count))) {
           detail::refuse(identity, address, "installed code bytes differ from declared variant");
         }
@@ -441,8 +471,13 @@ struct Core::Impl {
           mapping->writable != layout.writable || mapping->executable != layout.executable) {
         detail::refuse(identity, layout.address, "memory layout differs from prepared declaration");
       }
+      const auto base =
+          layout.space == Memory::Space::bus
+              ? 0U
+              : detail::tcm_register(variant.mapping, layout.space) & detail::tcm_base_mask;
       direct.push_back(
-          {.address_bias = reinterpret_cast<std::uintptr_t>(mapping->bytes.data()) - layout.address,
+          {.address_bias =
+               reinterpret_cast<std::uintptr_t>(mapping->bytes.data()) - (base + layout.address),
            .safe_write = unsigned(mapping->writable && !code_overlap(mapping->bytes))});
     }
     runtime.direct = direct.data();
@@ -464,9 +499,21 @@ struct Core::Impl {
         .kind = kind, .address = address, .identity = identity, .reason = std::move(reason)};
   }
 
+  [[nodiscard]] bool transition_matches(const CodeTransition &transition) const {
+    if (transition.source_variant != binding->image->variants[variant_index].id ||
+        transition.address != runtime.r[15]) {
+      return false;
+    }
+    const auto destination = std::ranges::find(
+        binding->image->variants, transition.destination_variant, &detail::Variant::id);
+    return destination != binding->image->variants.end() &&
+           detail::same_mapping(runtime.system.mapping, destination->mapping);
+  }
+
   void finish() {
     if (continuation.execution == ExecutionState::fault) { return; }
-    if (revoked && runtime.signal != static_cast<std::uint32_t>(detail::Signal::memory)) {
+    if (revoked && runtime.signal != static_cast<std::uint32_t>(detail::Signal::memory) &&
+        runtime.signal != static_cast<std::uint32_t>(detail::Signal::mapping_change)) {
       runtime.signal = static_cast<std::uint32_t>(detail::Signal::changed);
       runtime.address = revocation_address;
     }
@@ -475,11 +522,11 @@ struct Core::Impl {
       continuation.execution = ExecutionState::yielded;
       return;
     }
-    if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::changed) ||
+    if (runtime.signal == static_cast<std::uint32_t>(detail::Signal::mapping_change) ||
+        runtime.signal == static_cast<std::uint32_t>(detail::Signal::changed) ||
         runtime.signal == static_cast<std::uint32_t>(detail::Signal::transfer)) {
       for (const auto &transition : binding->image->transitions) {
-        if (transition.source_variant == binding->image->variants[variant_index].id &&
-            transition.address == runtime.r[15]) {
+        if (transition_matches(transition)) {
           continuation.execution = ExecutionState::transfer;
           continuation.transition_pending = true;
           continuation.transition = transition;
@@ -489,6 +536,11 @@ struct Core::Impl {
       }
     }
     switch (static_cast<detail::Signal>(runtime.signal)) {
+      case detail::Signal::mapping_change:
+        failure(Fault::Kind::changed_code,
+                runtime.address,
+                "CP15 mapping changed the prepared memory context");
+        break;
       case detail::Signal::changed:
         failure(Fault::Kind::changed_code,
                 runtime.address,
@@ -632,12 +684,15 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
   if (found == variants.end()) {
     detail::refuse(impl_->identity, impl_->runtime.r[15], "unknown installed variant");
   }
-  if (!same_mapping(impl_->runtime.system.mapping, found->mapping)) {
+  if (!detail::same_mapping(impl_->runtime.system.mapping, found->mapping)) {
     detail::refuse(
         impl_->identity, impl_->runtime.r[15], "CP15 mapping differs from prepared variant");
   }
-  if ((found->mapping.control & ~0x80U) != Registers::System::Mapping::reset_control ||
-      (found->mapping.instruction_tcm & 1) != 0 || (found->mapping.data_tcm & 1) != 0) {
+  if (!detail::valid_tcms(impl_->runtime.system.mapping) || !detail::valid_tcms(found->mapping)) {
+    detail::refuse(
+        impl_->identity, impl_->runtime.r[15], "unpredictable TCM geometry/base/overlap");
+  }
+  if ((found->mapping.control & ~0x80U) != Registers::System::Mapping::reset_control) {
     detail::refuse(impl_->identity,
                    impl_->runtime.r[15],
                    "CP15 memory-control behavior is not implemented for this configuration yet");
@@ -673,16 +728,16 @@ void Core::set_registers(const Registers &registers) {
   impl_->runtime.r = registers.r;
   impl_->runtime.cpsr = registers.cpsr;
   impl_->runtime.spsr = registers.spsr;
-  if (!same_mapping(impl_->runtime.system.mapping, registers.system.mapping)) {
-    impl_->binding.reset();
-    impl_->runtime.direct = nullptr;
-  }
   constexpr std::uint32_t tcm_size_bits = 0x3c;
   auto system = registers.system;
   system.mapping.instruction_tcm = (system.mapping.instruction_tcm & ~tcm_size_bits) |
                                    (impl_->runtime.system.mapping.instruction_tcm & tcm_size_bits);
   system.mapping.data_tcm = (system.mapping.data_tcm & ~tcm_size_bits) |
                             (impl_->runtime.system.mapping.data_tcm & tcm_size_bits);
+  if (!detail::same_mapping(impl_->runtime.system.mapping, system.mapping)) {
+    impl_->binding.reset();
+    impl_->runtime.direct = nullptr;
+  }
   impl_->runtime.system = system;
   impl_->external_entry = true;
 }
@@ -713,8 +768,8 @@ void Core::restore(const Snapshot &snapshot) {
   impl_->runtime.spsr = snapshot.impl_->state.registers.spsr;
   impl_->runtime.system = snapshot.impl_->state.registers.system;
   if (impl_->binding &&
-      !same_mapping(impl_->runtime.system.mapping,
-                    impl_->binding->image->variants[impl_->variant_index].mapping)) {
+      !detail::same_mapping(impl_->runtime.system.mapping,
+                            impl_->binding->image->variants[impl_->variant_index].mapping)) {
     impl_->binding.reset();
     impl_->runtime.direct = nullptr;
   }
@@ -783,8 +838,8 @@ void Core::reset(std::uint32_t vector) {
   impl_->runtime.system.mapping.instruction_tcm = instruction_tcm;
   impl_->runtime.system.mapping.data_tcm = data_tcm;
   if (impl_->binding &&
-      !same_mapping(impl_->runtime.system.mapping,
-                    impl_->binding->image->variants[impl_->variant_index].mapping)) {
+      !detail::same_mapping(impl_->runtime.system.mapping,
+                            impl_->binding->image->variants[impl_->variant_index].mapping)) {
     impl_->binding.reset();
     impl_->runtime.direct = nullptr;
   }

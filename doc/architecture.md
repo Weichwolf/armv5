@@ -105,8 +105,12 @@ writes leave through a real exit, so no unused system-register PHIs are carried
 through ordinary loops. A variant records the memory-control assumptions used
 by lowering and installation validates the actual processor state against them.
 Consumer-owned TCM storage uses the processor address spaces of contract v7.
-The first A5 increment implements the disabled-storage/geometry lifecycle;
-active routing, MMU/cache effects and maintenance remain explicit open work.
+TCM routing specializes each variant's known region state. Direct TCM descriptors
+use a guest-base-adjusted host bias; bus guards exclude active overlays. The
+ordinary disabled-TCM profile emits no additional overlay guards. Mapping MCR
+writes leave cold, revoke changed assumptions and preserve precise transitions.
+Instruction binding checks split storage views at ITCM boundaries; DTCM is never
+an instruction source. MMU/cache effects and maintenance remain explicit open work.
 
 ## ARM926 profile
 

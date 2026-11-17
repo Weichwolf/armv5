@@ -404,3 +404,54 @@ identity refusals. No manufacturer program bytes are used.
 Published increment totals: `src/` 4,146 lines (+269), `test/` 5,018 (+411)
 against the loop-grant increment. A5 memory-system completion, CoreMark, final
 sanitizers and macOS ARM64 qualification remain open.
+
+
+## Guest CP15 mapping writes and active TCM
+
+Guest control/TTBR/domain/FCSE/TCM-region writes now canonicalize architectural
+fields and exit after the completed instruction. Changed assumptions revoke the
+binding and use a declared context transition; unchanged writes continue. Active
+ITCM/DTCM use consumer-owned regions, with direct descriptors specialized to the
+known bases. Bus proofs exclude active overlays. DTCM never supplies instruction
+fetch; executable validation splits spans at ITCM boundaries. Code changes through
+actual storage aliases still stop at the complete store boundary.
+
+Independent fixtures cover both byte orders, fixed/bus-only/dynamic layouts,
+atomic exchanges, top/zero bases, all nine legal TCM sizes, code-source aliases,
+context masks, multiple explicitly declared destinations selected by actual CP15
+state (with equivalent/undeclared contexts rejected), exact instruction/cycle bounds, invalid region writes, pending
+transition snapshots and disable/relocation/re-enable with retained storage.
+Unpredictable TCM writes fail before retirement. Ignored writes to read-only size
+bits retain an unchanged binding. An installed SDK consumer enables DTCM via a
+guest MCR/declared transition and reads its distinct data under the new context.
+
+All six complete outputs and text sizes match the preceding register/storage
+increment. K1–K5 hardware instruction counts are unchanged. After adding
+state-selected transition alternatives, K6 is 12.445 I/GI versus 12.426 before:
+a small owner-side increase, with unchanged generated guest text. No aggregate
+zero-regression claim follows from the native-text comparison. K1/K5 object `.text` is again
+byte-identical (8,097/5,424 bytes). Ordinary disabled-TCM units carry no extra
+overlay or system-register checks. Same host and warm counter method as above.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.941 | 2.152 | 0.526681 | 1898.683 | 6.669x | 0.110134 | 8,097 | 289.179 |
+| K2 | 6.167 | 1.653 | 0.407228 | 2455.629 | 2.970x | 0.248030 | 16,168 | 234.319 |
+| K3 | 5.408 | 1.418 | 0.346820 | 2883.340 | 0.916x | 0.227892 | 16,833 | 267.190 |
+| K4 | 12.321 | 3.131 | 0.765772 | 1305.872 | 12.530x | 0.727865 | 21,799 | 382.439 |
+| K5 | 7.808 | 2.060 | 0.507926 | 1968.791 | 34.594x | 0.072139 | 5,424 | 493.091 |
+| K6 | 12.445 | 3.939 | 0.967005 | 1034.121 | 12.316x | 0.117856 | 8,772 | 292.400 |
+
+Guest instructions/base cycles per sample are unchanged; native guest share is
+100%. K6 retains the Q1.15 hash, 34,042 IRQs and 256-cycle bounds.
+
+```text
+armv5-a6c496ec643eb2ca86a96e03647fa974feebde302b5b41f53ad7be7bc3dff492-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites, configured tidy/format, offline
+source export and installed SDK consumers. Published increment totals: `src/`
+4,361 lines (+215), `test/` 5,815 (+797) against the register/storage increment.
+A5 alignment/L4/high vectors, MMU/FCSE/TLB/cache execution, architectural
+fault-register updates and remaining coprocessor/Jazelle qualification remain
+open. CoreMark, final sanitizers and macOS ARM64 qualification are also pending.

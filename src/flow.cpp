@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <llvm/IR/Value.h>
+#include <set>
 #include <vector>
 
 namespace armv5::detail {
@@ -86,8 +87,10 @@ void Lowering::cold_transfer(Values values, llvm::Value *target, Signal prepared
     dispatch->addCase(ir_.getInt32(instruction.pc),
                       instruction.continuation_only ? invalid : prepared);
   }
+  std::set<std::uint32_t> destinations;
   for (const auto &transition : image_.transitions) {
-    if (transition.source_variant != variant_.id || indices_.contains(transition.address)) {
+    if (transition.source_variant != variant_.id || indices_.contains(transition.address) ||
+        !destinations.insert(transition.address).second) {
       continue;
     }
     auto *next = block("unexpected.return.variant");

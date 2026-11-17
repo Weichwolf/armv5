@@ -4,6 +4,7 @@
 #include "armv5/core.hpp"
 #include "armv5/memory.hpp"
 #include "identity.hpp"
+#include "system.hpp"
 
 #include <algorithm>
 #include <array>
@@ -239,11 +240,25 @@ Span copy_span(std::string_view identity, const CodeSpan &span, const CompileOpt
           .thumb = thumb};
 }
 
-Registers::System::Mapping prepared_mapping(const CodeVariant &variant,
+Registers::System::Mapping prepared_mapping(std::string_view identity,
+                                            const CodeVariant &variant,
                                             const CompileOptions &options) {
   auto mapping = variant.mapping.value_or(Registers::System::Mapping{});
   if (!variant.mapping && options.big_endian) { mapping.control |= 0x80; }
+  if (!valid_tcms(mapping)) { refuse(identity, 0, "unpredictable TCM geometry/base/overlap"); }
   return mapping;
+}
+
+bool ambiguous_transition(const Image &image,
+                          const CodeTransition &current,
+                          const CodeTransition &previous) {
+  if (current.source_variant != previous.source_variant || current.address != previous.address) {
+    return false;
+  }
+  const auto first = std::ranges::find(image.variants, current.destination_variant, &Variant::id);
+  const auto second = std::ranges::find(image.variants, previous.destination_variant, &Variant::id);
+  return first != image.variants.end() && second != image.variants.end() &&
+         same_mapping(first->mapping, second->mapping);
 }
 
 void validate_links(const CodeImage &input, const Image &image) {
@@ -267,8 +282,7 @@ void validate_links(const CodeImage &input, const Image &image) {
     }
     for (std::size_t prior = 0; prior < index; ++prior) {
       const auto &other = image.transitions[prior];
-      if (other.source_variant == transition.source_variant &&
-          other.address == transition.address) {
+      if (ambiguous_transition(image, transition, other)) {
         refuse(image.identity, transition.address, "ambiguous code transition");
       }
     }
@@ -321,7 +335,7 @@ Image describe(const CodeImage &input, const CompileOptions &options) {
                  .spans = {},
                  .entries = {variant.entries.begin(), variant.entries.end()},
                  .layout = {},
-                 .mapping = prepared_mapping(variant, options)};
+                 .mapping = prepared_mapping(input.identity, variant, options)};
     for (const auto &span : variant.spans) {
       copy.spans.push_back(copy_span(input.identity, span, options));
     }

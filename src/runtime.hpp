@@ -27,7 +27,8 @@ enum class Signal : std::uint8_t {
   exchange,
   redispatch,
   yielded_exchange,
-  yielded_exception_return
+  yielded_exception_return,
+  mapping_change
 };
 
 struct DirectRegion {
