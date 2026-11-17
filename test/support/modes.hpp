@@ -20,6 +20,8 @@ void call_returns();
 void counted_loops();
 void system_lifecycle();
 void tcm_lifecycle();
+void memory_control();
+void control_lifecycle();
 
 namespace fixture {
 inline constexpr std::uint32_t user_mode = 0x10, fiq_mode = 0x11, irq_mode = 0x12,
@@ -48,7 +50,8 @@ public:
                  std::vector<std::uint32_t> declared_vectors = {},
                  bool fixed = true,
                  std::size_t ram_size = 0x10000,
-                 armv5::Io callbacks = {})
+                 armv5::Io callbacks = {},
+                 std::optional<armv5::Registers::System::Mapping> mapping = std::nullopt)
       : programs(std::move(code)), ram(ram_size), vectors(std::move(declared_vectors)) {
     storage.reserve(programs.size());
     for (auto &item : programs) {
@@ -74,7 +77,8 @@ public:
                         .writable = region.writable,
                         .executable = region.executable});
     }
-    const std::array variants{armv5::CodeVariant{.id = 0, .spans = spans, .entries = entries}};
+    const std::array variants{
+        armv5::CodeVariant{.id = 0, .spans = spans, .entries = entries, .mapping = mapping}};
     const std::array layouts{armv5::VariantLayout{.variant = 0, .regions = layout}};
     const armv5::CodeImage image{.identity = "authored-mode-fixture",
                                  .variants = variants,
@@ -85,10 +89,11 @@ public:
     native.emplace(armv5::Core::compile(image));
     core = std::make_unique<armv5::Core>(armv5::Memory{.regions = regions, .generation = 0},
                                          callbacks);
-    (void)core->install(*native, 0);
     auto initial = core->registers();
+    if (mapping) { initial.system.mapping = *mapping; }
     initial.r[15] = programs.front().program.address();
     core->set_registers(initial);
+    (void)core->install(*native, 0);
   }
 
   [[nodiscard]] const armv5::NativeImage &prepared() const {

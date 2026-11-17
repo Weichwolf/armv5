@@ -6,8 +6,9 @@ SSA LLVM execution and cacheable preparation. A3 adds specialized mode units,
 banked registers, precise exception entry/return and checked K6 event load;
 A4 adds classic Thumb/interworking, integer/DSP multiplication and all six
 checked kernels. The initial A5 increment adds CP15 register state, context-bound
-variants and separate consumer-owned TCM storage spaces. Memory-system execution
-and profile completion remain open. See
+variants and separate consumer-owned TCM storage spaces; subsequent increments
+add guest mapping writes, active TCM routing and A/L4/V controls. MMU/cache
+execution and profile completion remain open. See
 [isa-coverage.md](isa-coverage.md) and [api.md](api.md) for current evidence.
 
 ```text
@@ -110,7 +111,12 @@ use a guest-base-adjusted host bias; bus guards exclude active overlays. The
 ordinary disabled-TCM profile emits no additional overlay guards. Mapping MCR
 writes leave cold, revoke changed assumptions and preserve precise transitions.
 Instruction binding checks split storage views at ITCM boundaries; DTCM is never
-an instruction source. MMU/cache effects and maintenance remain explicit open work.
+an instruction source. A-bit alignment guards specialize at preparation and run
+before any access or register update; A=0 units gain no guards. An alignment exit
+records DFSR/FAR and enters the ordinary abort path with its exact SSA prefix.
+L4 specializes PC-load exchange in ordinary and yielding paths. The owner applies
+V before validating actual vector declarations. MMU/cache effects and maintenance
+remain explicit open work.
 
 ## ARM926 profile
 

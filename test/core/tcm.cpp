@@ -434,6 +434,8 @@ void tcm_lifecycle() {
   constexpr std::array cases{
       WriteCase{
           .field = Field::control, .instruction = 0xee010f10, .input = 0x80, .expected = 0x500f8},
+      WriteCase{
+          .field = Field::control, .instruction = 0xee010f10, .input = 0xa082, .expected = 0x5a0fa},
       WriteCase{.field = Field::table,
                 .instruction = 0xee020f10,
                 .input = 0x1234ffff,

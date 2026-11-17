@@ -148,6 +148,18 @@ llvm::Value *Lowering::access(
   return result;
 }
 
+bool Lowering::load_exchange() const {
+  return (variant_.mapping.control & 0x8000) == 0;
+}
+
+void Lowering::alignment(Values &values, llvm::Value *address, unsigned width) {
+  if (width == 1 || (variant_.mapping.control & 2) == 0) { return; }
+  guard(ir_.CreateICmpEQ(ir_.CreateAnd(address, c32(width - 1)), c32(0)),
+        values,
+        Signal::alignment_abort,
+        address);
+}
+
 void Lowering::swap_memory(const Instruction &instruction, Values &values) {
   const auto word = instruction.word;
   const auto base_index = (word >> 16) & 15;
@@ -158,6 +170,7 @@ void Lowering::swap_memory(const Instruction &instruction, Values &values) {
   }
   auto *base = values.r[base_index];
   const unsigned width = (word & 0x00400000) != 0 ? 1 : 4;
+  alignment(values, base, width);
   auto *address = width == 4 ? ir_.CreateAnd(base, c32(arm_pc_mask)) : base;
   auto *loaded = access(values, address, width, 2, values.r[word & 15]);
   if (width == 4) {
@@ -245,6 +258,7 @@ void Lowering::memory(const Instruction &instruction, Values &values) {
   auto *offset = transfer_offset(instruction, values, plan);
   auto *adjusted = plan.up ? ir_.CreateAdd(base, offset) : ir_.CreateSub(base, offset);
   auto *address = plan.pre ? adjusted : base;
+  alignment(values, address, plan.width);
   if (plan.extra && plan.width > 1) {
     guard(ir_.CreateICmpEQ(ir_.CreateAnd(address, c32(plan.count == 2 ? 7 : 1)), c32(0)),
           values,
@@ -308,6 +322,7 @@ void Lowering::multiple(const Instruction &instruction, Values &values) {
   // ARMv5 multiple transfers ignore address bits 1:0 when alignment checking is off.
   auto *start = up ? ir_.CreateAdd(base, c32(pre ? 4 : 0))
                    : ir_.CreateSub(base, c32((count * 4) - (pre ? 0 : 4)));
+  alignment(values, start, 4);
   start = ir_.CreateAnd(start, c32(arm_pc_mask));
   unsigned offset = 0;
   for (unsigned index = 0; index < 16; ++index) {

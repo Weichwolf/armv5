@@ -169,7 +169,7 @@ void callback_prefix() {
 enum class PcLoad : std::uint8_t { single, multiple, exception, thumb_pop };
 constexpr std::uint32_t arm_destination = 0x1100, thumb_destination = 0x1200,
                         callback_high = 0x87654321, initial_high = 0x11223344,
-                        fiq_high = 0x55667788, saved_flags = 0xa8000000;
+                        legacy_control = 0x58078, fiq_high = 0x55667788, saved_flags = 0xa8000000;
 
 struct PcCallback {
   armv5::Core *cpu = nullptr;
@@ -227,7 +227,8 @@ armv5::State pc_yield_expected(armv5::State expected, PcLoad form, std::uint32_t
   return expected;
 }
 
-void pc_yield(PcLoad form, std::uint32_t target, unsigned budget, bool cycle_bound = false) {
+void pc_yield(
+    PcLoad form, std::uint32_t target, unsigned budget, bool cycle_bound = false, bool l4 = false) {
   const bool pop = form == PcLoad::thumb_pop;
   const bool multiple = form == PcLoad::multiple || form == PcLoad::exception;
   PcCallback callback{.multiple = multiple, .target = target, .prefixes = {}};
@@ -241,18 +242,21 @@ void pc_yield(PcLoad form, std::uint32_t target, unsigned budget, bool cycle_bou
   thumb.half(move_r1); // MOVS R1,#3, then a BL pair whose suffix rejects branch entry.
   thumb.half(bl_prefix);
   thumb.half(bl_suffix);
-  fixture::Modes machine({{.program = code,
-                           .modes = {fixture::supervisor_mode},
-                           .instruction_set = pop ? armv5::CodeSpan::InstructionSet::thumb
-                                                  : armv5::CodeSpan::InstructionSet::arm},
-                          {.program = arm, .modes = {fixture::supervisor_mode, fixture::fiq_mode}},
-                          {.program = thumb,
-                           .modes = {fixture::supervisor_mode, fixture::fiq_mode},
-                           .instruction_set = armv5::CodeSpan::InstructionSet::thumb}},
-                         {},
-                         true,
-                         0x10000,
-                         {.owner = &callback, .read = &PcCallback::read});
+  fixture::Modes machine(
+      {{.program = code,
+        .modes = {fixture::supervisor_mode},
+        .instruction_set =
+            pop ? armv5::CodeSpan::InstructionSet::thumb : armv5::CodeSpan::InstructionSet::arm},
+       {.program = arm, .modes = {fixture::supervisor_mode, fixture::fiq_mode}},
+       {.program = thumb,
+        .modes = {fixture::supervisor_mode, fixture::fiq_mode},
+        .instruction_set = armv5::CodeSpan::InstructionSet::thumb}},
+      {},
+      true,
+      0x10000,
+      {.owner = &callback, .read = &PcCallback::read},
+      l4 ? std::optional(armv5::Registers::System::Mapping{.control = legacy_control})
+         : std::nullopt);
   callback.cpu = machine.core.get();
   auto registers = machine.core->registers();
   registers.cpsr = fixture::fiq_mode;
@@ -265,6 +269,10 @@ void pc_yield(PcLoad form, std::uint32_t target, unsigned budget, bool cycle_bou
   machine.core->set_registers(registers);
   auto callback_expected = machine.core->state();
   auto expected = pc_yield_expected(callback_expected, form, target);
+  if (l4 && form != PcLoad::exception) {
+    expected.registers.cpsr = callback_expected.registers.cpsr;
+    expected.registers.r[15] = target & (pop ? ~std::uint32_t{1} : ~std::uint32_t{3});
+  }
   const bool invalid = target == thumb_destination + 5 && form != PcLoad::exception;
   const bool missing = target == undeclared || target == undeclared + 1;
   const bool refused = invalid || (missing && ((target & 1) != 0 || budget > 1));
@@ -295,6 +303,23 @@ void pc_yield(PcLoad form, std::uint32_t target, unsigned budget, bool cycle_bou
                    "PC yield snapshot retains complete boundary");
   (void)machine.core->run(1);
   fixture::require(machine.core->state() == after, "PC yield snapshot replay");
+}
+
+void legacy_pc_yields() {
+  struct Case {
+    PcLoad form;
+    std::uint32_t target;
+  };
+
+  const std::array cases{Case{.form = PcLoad::single, .target = arm_destination + 1},
+                         Case{.form = PcLoad::multiple, .target = arm_destination + 1},
+                         Case{.form = PcLoad::exception, .target = thumb_destination + 1},
+                         Case{.form = PcLoad::thumb_pop, .target = thumb_destination}};
+  for (const auto test : cases) {
+    pc_yield(test.form, test.target, 1, false, true);
+    pc_yield(test.form, test.target, 16, false, true);
+    pc_yield(test.form, test.target, 1, true, true);
+  }
 }
 
 void predicated_call(bool taken) {
@@ -328,6 +353,7 @@ void call_returns() {
     pc_yield(PcLoad::single, target, 1);
     pc_yield(PcLoad::single, target, 16);
   }
+  legacy_pc_yields();
   callback_prefix();
   predicated_call(false);
   predicated_call(true);

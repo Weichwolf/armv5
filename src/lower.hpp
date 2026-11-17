@@ -207,6 +207,8 @@ private:
   void validate_transfer(const Instruction &instruction, const Transfer &plan) const;
   llvm::Value *
   transfer_offset(const Instruction &instruction, const Values &values, const Transfer &plan);
+  void alignment(Values &values, llvm::Value *address, unsigned width);
+  [[nodiscard]] bool load_exchange() const;
   void swap_memory(const Instruction &instruction, Values &values);
   void memory(const Instruction &instruction, Values &values);
   [[nodiscard]] bool multiple_user_bank(const Instruction &instruction) const;

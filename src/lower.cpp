@@ -416,7 +416,7 @@ void Lowering::signal_guard(const Instruction &instruction,
   // Faulting accesses have already left before retirement in slow_access.
   if (instruction.terminates) {
     if (!emit_event(instruction, values, old_status, true)) {
-      transfer(values, values.r[15], true, TransferExit::yielded);
+      transfer(values, values.r[15], load_exchange(), TransferExit::yielded);
     }
   } else {
     finish_exit(values, pending_signal_, load(ir_.getInt32Ty(), offsetof(Runtime, address)));
@@ -847,7 +847,10 @@ void Lowering::emit_instruction(const Instruction &instruction, Values &values) 
   if (instruction.terminates) {
     return_transfer(values,
                     instruction.operation != Operation::alu &&
-                        instruction.operation != Operation::branch);
+                        instruction.operation != Operation::branch &&
+                        ((instruction.operation != Operation::single &&
+                          instruction.operation != Operation::multiple) ||
+                         load_exchange()));
   }
 }
 

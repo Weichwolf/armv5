@@ -177,7 +177,9 @@ struct Core::Impl {
   };
 
   bool exception(Exception target, std::uint32_t link, bool fast, bool charge) {
-    const auto [vector, mode] = target;
+    const auto mode = target.mode;
+    const auto vector =
+        target.vector | ((runtime.system.mapping.control & 0x2000) != 0 ? 0xffff0000U : 0U);
     if (!declared_vector(vector, mode)) {
       failure(Fault::Kind::unprepared, vector, "exception vector/mode was not declared");
       return false;
@@ -264,6 +266,10 @@ struct Core::Impl {
       case detail::Signal::prefetch_abort:
         return exception(
             {.vector = 12, .mode = detail::abort_mode}, runtime.address + 4, false, false);
+      case detail::Signal::alignment_abort:
+        runtime.system.data_fault_status = 1;
+        runtime.system.fault_address = runtime.address;
+        [[fallthrough]];
       case detail::Signal::data_abort:
         return exception(
             {.vector = 16, .mode = detail::abort_mode}, runtime.r[15] + 8, false, true);
@@ -692,7 +698,9 @@ PreparationReport Core::install(const NativeImage &image, std::uint32_t variant)
     detail::refuse(
         impl_->identity, impl_->runtime.r[15], "unpredictable TCM geometry/base/overlap");
   }
-  if ((found->mapping.control & ~0x80U) != Registers::System::Mapping::reset_control) {
+  constexpr std::uint32_t implemented_control = 0xa082; // A, B, V and L4.
+  if ((found->mapping.control & ~implemented_control) !=
+      Registers::System::Mapping::reset_control) {
     detail::refuse(impl_->identity,
                    impl_->runtime.r[15],
                    "CP15 memory-control behavior is not implemented for this configuration yet");

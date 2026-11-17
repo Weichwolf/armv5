@@ -1,6 +1,6 @@
 # ISA and implementation coverage
 
-A4 and the initial A5 register/storage increment execute the operations below
+A4 and the published A5 memory-control increments execute the operations below
 through prepared LLVM images. This is **not** complete ARMv5TEJ qualification.
 The ARM926 memory system and remaining CP15 effects are open.
 Tests are independently authored programs, run through the public interface with
@@ -17,7 +17,8 @@ checked through `Core::lower`; no private decoder or alternate executor is used.
 | LDRH/STRH/LDRSB/LDRSH/LDRD/STRD | Immediate/register addressing implemented, signed extension and pairs; fixtures cover signed byte/halfword and doubleword loads/stores in both byte orders. Unpredictable alignment and operand combinations explicitly refuse; exhaustive addressing combinations remain open |
 | LDM/STM | Ordinary-bank IA/IB/DA/DB implemented, ordered transfers and writeback; independent stack push/pop fixtures and K4 returns; user-bank forms independently checked in all five exception modes, plus LDM^ exception return and old-bank writeback |
 | SWP/SWPB | One atomic I/O callback or one owner RAM transaction; byte/word and legacy alignment implemented, both byte orders checked |
-| CP15 MRC and register-only MCR | `test/isa/system.cpp` independently checks reset ID aliases/cache geometry, control/TTBR/domain/fault/context/lockdown reads, software writes to DFSR/IFSR/FAR/context ID, NZCV-only MRC R15, predication and User-mode Undefined. Control/TTBR/domain/FCSE/TCM writes canonicalize fields and leave through exact context exits; cache/TLB maintenance and architectural abort-status updates remain pending |
+| CP15 MRC and register-only MCR | `test/isa/system.cpp` independently checks reset ID aliases/cache geometry, control/TTBR/domain/fault/context/lockdown reads, software writes to DFSR/IFSR/FAR/context ID, NZCV-only MRC R15, predication and User-mode Undefined. Control/TTBR/domain/FCSE/TCM writes canonicalize fields and leave through exact context exits; alignment faults update DFSR/FAR; cache/TLB maintenance and other architectural abort-status updates remain pending |
+| CP15 A/L4/V controls | `test/isa/control.cpp` checks alignment faults before any access/writeback in all seven modes, ARM/Thumb, both byte orders and fixed/dynamic memory, including single/extra/double/multiple/SWP transfers, signed bytes, false predicates and preserved IFSR. LDR/LDM/Thumb POP honor L4 while BX/BLX keep interworking; yielding loads and LDM^ SPSR returns are checked in `test/core/returns.cpp`. `test/core/control.cpp` checks high SWI/UDF/BKPT/Data Abort/IRQ/FIQ vectors from ARM/Thumb, exact banks/status/cycles, missing high-vector declarations, snapshots and an alignment fault after a completed counted-loop turn |
 | Absent external coprocessors | MRC/MCR to coprocessors 0–13 take precise Undefined without transferring data; all 14 numbers and both directions have full-state/vector checks. Other coprocessor instruction classes and CP14 remain open |
 | TCM storage and CP15 assumptions | `test/isa/tcm.cpp` checks overlay data routing, both byte orders, fixed/bus-only/dynamic layouts, top/zero bases, all nine legal TCM sizes, SWP and instruction-source invalidation. `test/core/tcm.cpp` checks guest MCR context changes and state-selected alternatives, exact bounds, pending-transfer snapshots, TTBR/PID masks, TCM disable/relocation/re-enable, boundary-split executable validation and invalid writes. `test/core/system.cpp` checks storage geometry/presence, context-specific install, profile snapshots and artifact identity |
 | MRS/MSR | CPSR/SPSR reads and byte-selected writes, privilege masks and dynamic mode validation; all seven modes switch prepared units. All five SPSRs roundtrip and restore NZCVQ/mode through MOVS PC and LDM^; invalid User/System SPSR forms refuse preparation |
@@ -43,7 +44,7 @@ checked through `Core::lower`; no private decoder or alternate executor is used.
 
 | Mandatory profile work still open | Milestone |
 |---|---|
-| MMU-triggered instruction/data abort status, high vectors and CP15 reset state | A5 |
+| MMU-triggered aborts, external-abort DFSR/FAR and debug/prefetch IFSR updates (A-bit alignment status and high vectors implemented) | A5 |
 | Remaining coprocessor/CP15 semantics; MMU/FCSE translation/TLB, domains/permissions/faults and cache maintenance (TCM routing/context writes implemented) | A5 |
 | BXJ documented fallback/exception behavior and explicit Java capability; Java execution unresolved | Open |
 | Exhaustive encoding/operand/addressing qualification, architectural memory-abort ordering and code/mapping edge cases | Open; prevents profile completion |

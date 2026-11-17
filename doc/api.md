@@ -96,9 +96,24 @@ Executable validation splits spans at ITCM boundaries. Writes through any host
 alias of actual prepared code revoke the binding, including an ITCM alias.
 Ignoring a write to read-only size bits does not revoke an unchanged binding.
 
-Alignment/high-vector/MMU/cache execution effects and maintenance remain open;
-those configurations cannot yet be installed. Architectural fault-register
-updates and the remaining CP15 operations are pending. See `isa-coverage.md`.
+Prepared variants support the A, B, V and L4 control bits. With A set, unaligned
+word/halfword accesses take Data Abort before any memory access or writeback;
+byte accesses remain allowed. The first unaligned transfer address is recorded in
+FAR and DFSR becomes 1; IFSR is preserved. An alignment abort retires no instruction
+and charges the ordinary three-cycle exception entry. Doubleword transfers retain
+the ARMv5 requirement for eight-byte alignment; a word-aligned but non-doubleword-
+aligned operand remains an explicit unpredictable-access refusal. With A clear,
+legacy rotation/alignment behavior is unchanged.
+
+L4 inhibits instruction-set exchange for LDR/LDM to PC and Thumb POP PC, including
+successful callbacks that request yield. BX/BLX and SPSR exception returns retain
+their independent state-change semantics. V selects exception addresses in
+`0xffff0000..0xffff001c`; each actual high vector and its mode must be declared.
+Reset uses fixed low-vector/little-endian input pins (V=B=0).
+
+MMU/cache execution effects and maintenance remain open; those configurations
+cannot yet be installed. External-abort DFSR/FAR and debug/prefetch IFSR updates
+and remaining CP15 operations are pending. See `isa-coverage.md`.
 
 ## Execution and snapshots
 
@@ -178,7 +193,8 @@ Abort vectors respectively. ALU S+PC and LDM^ with PC restore SPSR and register
 banks. LDM/STM^ without PC access User banks. User/System SPSR and ^ forms refuse
 preparation. Reset deterministically clears unspecified register/bank values,
 sets CPSR 0xd3 and starts at the supplied aligned vector. MMU-driven prefetch
-aborts, high vectors, CP15 and sleep/resume remain A5 work. Thumb exception returns restore T and resume the declared Thumb unit.
+aborts, remaining CP15 operations and sleep/resume remain A5 work. Thumb exception
+returns restore T and resume the declared Thumb unit.
 
 ## Nominal cycles
 

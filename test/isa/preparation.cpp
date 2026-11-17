@@ -463,6 +463,7 @@ int main() {
     status_and_predicated_memory();
     swaps();
     system_registers();
+    memory_control();
     tcm_accesses();
     preparation_refusals();
     memory_boundaries();

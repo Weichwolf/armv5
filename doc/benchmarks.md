@@ -455,3 +455,50 @@ source export and installed SDK consumers. Published increment totals: `src/`
 A5 alignment/L4/high vectors, MMU/FCSE/TLB/cache execution, architectural
 fault-register updates and remaining coprocessor/Jazelle qualification remain
 open. CoreMark, final sanitizers and macOS ARM64 qualification are also pending.
+
+
+## CP15 alignment, legacy PC loads and high vectors
+
+Variants now specialize the A and L4 control bits, while the owner selects actual
+exception vectors from V before checking declarations. A-bit alignment faults
+leave before any access or writeback and update DFSR/FAR. Independent fixtures
+cover all seven modes, both instruction sets and byte orders, fixed/dynamic
+memory, predication, exact first addresses, loop-turn fault prefixes, callbacks,
+SPSR returns and snapshot replay. Guest MCR can transition to a context with all
+four supported control bits A/B/V/L4 set.
+
+All complete kernel outputs and generated text sizes are unchanged from the TCM
+increment. K1–K5 retain their rounded hardware instruction counts. Disabled
+alignment checking adds no generated guards. K6 measures 12.446 I/GI versus
+12.445 previously, including owner high-vector selection on each IRQ; the native
+guest text remains 8,772 bytes. These are full-interface measurements, with no
+claim of zero owner overhead. Same CPU 2, i5-10400, Clang/LLVM 19.1.7 Release,
+warm-up and median-of-three user hardware-counter method as above;
+`perf_event_paranoid=2`.
+
+| Kernel | Host I/GI | Host cycles/GI | ns/GI | Guest M I/s | Native/C++ time | Preparation s | Text bytes | Bytes/prepared GI |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| K1 | 7.941 | 2.153 | 0.530717 | 1884.243 | 6.761x | 0.109810 | 8,097 | 289.179 |
+| K2 | 6.167 | 1.671 | 0.409812 | 2440.145 | 3.036x | 0.248281 | 16,168 | 234.319 |
+| K3 | 5.408 | 1.419 | 0.347174 | 2880.402 | 0.921x | 0.228494 | 16,833 | 267.190 |
+| K4 | 12.321 | 3.136 | 0.766902 | 1303.947 | 12.548x | 0.727820 | 21,799 | 382.439 |
+| K5 | 7.808 | 2.060 | 0.510792 | 1957.742 | 39.275x | 0.074928 | 5,424 | 493.091 |
+| K6 | 12.446 | 3.838 | 0.955273 | 1046.822 | 11.915x | 0.118313 | 8,772 | 292.400 |
+
+Guest instructions/base cycles per sample are unchanged; native guest share is
+100%. K6 retains the Q1.15 K1 hash, 34,042 IRQs and 256-cycle bounds.
+
+```text
+armv5-6cd1e5cf3dd6313d3cdba74d031fcdb97851dd5d2180124589fc9843f9b528d2-llvm-19.1.7-x86_64-pc-linux-gnu
+```
+
+Validation: strict Release, all three suites, configured tidy/format, source-only
+export build and installed SDK consumers. The new standalone consumer uses only
+the two installed public headers, takes an alignment abort to a high vector and
+reads DFSR through guest MRC. Published increment totals: `src/` 4,390 lines
+(+29), `test/` 6,434 (+619) against the active-TCM increment. No existing semantic
+golden was weakened; the legacy PC-yield cases add explicit L4 expectations.
+MMU/FCSE/TLB/cache execution and maintenance, external/debug/prefetch fault-status
+qualification and remaining coprocessor/Jazelle behavior remain open. CoreMark,
+final sanitizers and macOS ARM64 qualification are pending. This is not A5
+completion.
